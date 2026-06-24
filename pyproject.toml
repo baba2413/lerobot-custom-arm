@@ -1,0 +1,14 @@
+[project]
+name = "lerobot_robot_forte_arm"
+version = "0.1.0"
+description = "forte arm with LeRobot VLA"
+dependencies = [
+    "torch",
+    "numpy",
+    "opencv-python"
+]
+requires-python = ">= 3.10"
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
