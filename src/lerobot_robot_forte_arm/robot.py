@@ -1,32 +1,111 @@
-import torch
-from lerobot.common.robot_devices.robots.utils import Robot
-from .config import MyHandmadeArmConfig
+from lerobot.cameras import make_cameras_from_configs
+from lerobot.motors import Motor, MotorNormMode
+from robstride_motors_bus import RobstrideMotorsBus
+from lerobot.robots import Robot
 
-class MyHandmadeArm(Robot):
-    config_class = MyHandmadeArmConfig
+class ForteArm(Robot):
+    config_class = ForteArmConfig
+    name = "forte_arm"
 
-    def __init__(self, config: MyHandmadeArmConfig, teleport_device=None):
-        super().__init__(config, teleport_device)
-        self.config = config
-        self._is_connected = False
+    def __init__(self, config: ForteArmConfig):
+        super().__init__(config)
+        self.bus = RobstrideMotorsBus(
+            port = self.config.port,
+            motors={
+                "shoulder_yaw": Motor(),
+                "shoulder_pitch": Motor(),
+                "shoulder_roll": Motor(),
+                "elbow_pitch": Motor(),
+                "lower_arm_roll": Motor(),
+                "wrist_pitch": Motor(),
+                "LeftGripperJoint": Motor(),
+            },
+            calibration=self.calibration,
+        )
+        self.cameras = make_cameras_from_configs(config.cameras)
 
-    def connect(self):
-        """PCB와 컴퓨터가 연결되었을 때 시리얼 포트를 여는 구간입니다."""
-        print("🔗 수제 로봇 팔에 연결을 시도합니다... (하드웨어 대기 중)")
-        self._is_connected = True
+        @property
+        def _motors_ft(self) -> dict[str, type]:
+            return {
+                "shoulder_yaw": float,
+                "shoulder_pitch": float,
+                "shoulder_roll": float,
+                "elbow_pitch": float,
+                "lower_arm_roll": float,
+                "wrist_pitch": float,
+                "LeftGripperJoint": float,
+            }
+        
+        @property
+        def _cameras_ft(self) -> dict[str, tuple]:
+            return{
+                cam: (self.cameras[cam].height, self.cameras[cam].width, 3) for cam in self.cameras
+            }
+        
+        @property
+        def observation_features(self)-> dict:
+            return {**self._motors_ft, **self._cameras_ft}
+        
+        def action_features(self) -> dict:
+            return self._motor_ft
+        
+        @property
+        def is_connected(self) -> bool:
+            return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
+        
+        def connect(self, calibrate:bool = True) -> None:
+            self.bus.connect()
+            if not self.is_calibrated and calibrate:
+                self.calibrate()
 
-    def get_observation(self) -> dict[str, torch.Tensor]:
-        """로봇의 현재 모터 각도와 카메라 화면을 읽어오는 함수입니다."""
-        # 하드웨어가 없으므로 임시로 0으로 가득 찬 가짜 모터 각도를 반환합니다.
-        mock_state = torch.zeros(self.config.state_dim)
-        return {"observation.state": mock_state}
+            for cam in self.camera.values():
+                cam.connect()
 
-    def send_action(self, action: torch.Tensor):
-        """AI 두뇌가 '이렇게 움직여'라고 명령(Action)하면 모터에 각도를 쏘는 함수입니다."""
-        # 나중에 여기에 PCB 시리얼 통신(예: serial.write) 코드가 들어갑니다.
-        pass
+            self.configure()
 
-    def disconnect(self):
-        """종료할 때 모터 힘을 풀고 포트를 닫는 구간입니다."""
-        self._is_connected = False
-        print("🔌 연결을 안전하게 해제했습니다.")
+        def disconnect(self) -> None:
+            self.bus.disconnect()
+            for cam in self.cameras.values():
+                cam.disconnect()
+
+        @property
+        def is_calibrated(self) -> bool:
+            return True
+
+        def calibrate(self) -> None:
+            self.bus.disable_torque()
+            for motor in self.bus.motors:
+                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+            input(f"Move {self} to the middle of its range of motion and press Enter.")
+            homing_offset = self.bus.set_half_turn_homings()
+
+        @property
+        def is_calibrated(self) -> bool:
+            return self.bus.is_calibrated
+        
+        def configure(self) -> None:
+            with self.bus.torque_disabled():
+                self.bus.configure_motors()
+                for motor in self.bus.motors:
+                    self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+                    self.bus.write("P_Coefficient", motor, 16)
+                    self.bus.write("I_Coefficient", motor, 0)
+                    self.bus.write("d_Coefficient", motor, 32)
+
+        def get_observation(self) -> dict[str, Any]:
+            if not self.is_connected:
+                raise ConnectionError(f"{self} is not connected")
+            
+            obs_dict = self.bus.sync_read("Present_Position")
+            obs_dict = {f"{motor}.pos":val for motor,val in obs_dict.items()}
+
+            for cam_key, cam in self.cameras.items():
+                obs_dict[cam_key] = cam.aync_read()
+
+            return obs_dict
+        
+        def send_action(self, action: dict[str, Any]) -> dict[str,Any]:
+            goal_pos = {key.removeduffix(".pos"): val for key,val in action.items()}
+
+            self.bus.sync_write("Goal_Position", goal_pos)
+            return action
