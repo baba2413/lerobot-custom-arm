@@ -1,0 +1,3 @@
+torch
+numpy
+lerobot[intelrealsense,pyserial-dep,robstride] @ file:///home/daros/workspace2/lerobot

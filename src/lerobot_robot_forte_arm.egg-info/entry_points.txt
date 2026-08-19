@@ -1,0 +1,2 @@
+[console_scripts]
+forte-arm-smoke-test = lerobot_robot_forte_arm.smoke_test:main

@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: lerobot_robot_forte_arm
+Version: 0.1.0
+Summary: forte arm with LeRobot VLA
+Requires-Python: >=3.12
+Requires-Dist: torch
+Requires-Dist: numpy
+Requires-Dist: lerobot[intelrealsense,pyserial-dep,robstride] @ file:///home/daros/workspace2/lerobot

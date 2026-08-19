@@ -5,9 +5,12 @@ description = "forte arm with LeRobot VLA"
 dependencies = [
     "torch",
     "numpy",
-    "opencv-python"
+    "lerobot[robstride,intelrealsense,pyserial-dep] @ file:///home/daros/workspace2/lerobot",
 ]
-requires-python = ">= 3.10"
+requires-python = ">=3.12"
+
+[project.scripts]
+forte-arm-smoke-test = "lerobot_robot_forte_arm.smoke_test:main"
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]

@@ -1,7 +1,7 @@
 
 from serial import Serial
 import time
-from mit_func import can2serial
+from robstride_mit.mit_func import can2serial
 
 
 class RobstrideMotor:

@@ -1,4 +1,4 @@
-from motors_bus import MotorsBusBase, Motor, MotorCalibration, Value
+from lerobot.motors.motors_bus import MotorsBusBase, Motor, MotorCalibration, Value
 from robstride_mit import mit_func
 from robstride_mit.robstride_motor.motor import RobstrideMotor
 
@@ -39,8 +39,8 @@ class RobstrideMotorsBus(MotorsBusBase):
 
         self._is_connected = True
 
-    def disconnect(self, disable_torque: bool = True) -> None:
-        if self.motor is not None and disable_torque:
+    def disconnect(self) -> None:
+        if self.motor is not None:
             for motor_name, motor in self.motors.items():
                 self._set_mode(motor.id, mit_func.MENU_MODE)
 
