@@ -1,71 +1,58 @@
 #!/usr/bin/env python
 """
-Read-only hardware smoke test for the Forte master/slave rig's LeRobot integration.
+Read-only hardware smoke test for the Forte master/slave rig, talking to the Teensy over its
+single USB-serial port (teensy-forte, `teleop-bi` / `teleop-bi-p-t` branches).
 
-Opens both CAN buses, reads present position on all 4 joints for BOTH the master (leader) and
-slave (follower) arms, and optionally grabs one frame from the RealSense camera. It talks to the
-motors buses directly instead of going through ForteArm.connect()/configure(), so torque is never
-enabled and neither arm can move -- use this to check wiring, CAN ids and the camera before
-trying lerobot-record or lerobot-teleoperate.
-
-Safe to run whether or not the Teensy's bilateral firmware (teensy-forte, teleop-bi-p-t branch) is
-currently running -- this script never writes to the bus.
+Never sends 'e' -- doesn't enable or move anything. Just opens the serial link, waits long enough
+to catch at least one status-print cycle from the Teensy (~1-2s, see LOG_PERIOD in teensy.ino),
+and prints whatever master/slave positions it received. Also optionally grabs one RealSense frame.
 """
 
 import argparse
+import time
 
-from lerobot.motors import Motor, MotorNormMode
-from lerobot.motors.robstride.robstride import RobstrideMotorsBus
-
-from lerobot_robot_forte_arm.config import CAN_BUSES, JOINTS
+from lerobot_robot_forte_arm.config import JOINTS
+from lerobot_robot_forte_arm.teensy_link import TeensyLink
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port-can1", required=True, help="CAN interface for bus 'can1', e.g. /dev/ttyUSB0 or can0")
-    parser.add_argument("--port-can2", required=True, help="CAN interface for bus 'can2', e.g. /dev/ttyUSB1 or can1")
-    parser.add_argument("--can-interface", default="auto", choices=["auto", "slcan", "socketcan"])
-    parser.add_argument("--motor-type", default="o0", help="Robstride motor type shared by all motors")
+    parser.add_argument("--port", required=True, help="Teensy serial port, e.g. /dev/ttyACM0")
+    parser.add_argument("--baudrate", type=int, default=115200)
+    parser.add_argument("--wait-s", type=float, default=3.0, help="How long to wait for status lines")
     parser.add_argument("--skip-camera", action="store_true", help="Don't try to read from the RealSense camera")
     args = parser.parse_args()
 
-    ports = {"can1": args.port_can1, "can2": args.port_can2}
+    link = TeensyLink.get(args.port, args.baudrate)
+    print(f"Connecting to Teensy on {args.port} @ {args.baudrate} (never sends 'e' -- nothing will move)...")
+    link.connect()
+    print(f"Waiting up to {args.wait_s:.1f}s for status lines...")
+    time.sleep(args.wait_s)
 
-    for role, id_index in (("master", 2), ("slave", 1)):
-        motors_by_bus: dict[str, dict[str, Motor]] = {bus: {} for bus in CAN_BUSES}
-        gear_ratio: dict[str, float] = {}
-        for joint_name, entry in JOINTS.items():
-            bus, slave_id, master_id, ratio = entry
-            can_id = slave_id if role == "slave" else master_id
-            motors_by_bus[bus][joint_name] = Motor(
-                id=can_id, model="robstride", norm_mode=MotorNormMode.DEGREES, motor_type_str=args.motor_type
-            )
-            gear_ratio[joint_name] = ratio
+    positions = link.get_positions_deg()
+    print(
+        f"\n{'joint':<16} {'slave id':>9} {'master id':>10} {'gear ratio':>11} "
+        f"{'slave deg':>10} {'master deg':>11}"
+    )
+    missing = []
+    for joint, (slave_id, master_id, ratio) in JOINTS.items():
+        if slave_id not in positions or master_id not in positions:
+            missing.append(joint)
+            continue
+        slave_link_deg = positions[slave_id] / ratio
+        master_link_deg = positions[master_id] / ratio
+        print(
+            f"{joint:<16} {slave_id:>9} {master_id:>10} {ratio:>11.4f} "
+            f"{slave_link_deg:>10.2f} {master_link_deg:>11.2f}"
+        )
 
-        print(f"\n=== {role.upper()} arm ===")
-        buses = {
-            bus: RobstrideMotorsBus(
-                port=ports[bus], motors=motors, can_interface=args.can_interface, use_can_fd=False
-            )
-            for bus, motors in motors_by_bus.items()
-        }
-        for bus in buses.values():
-            bus.connect(handshake=True)
-        print(f"CAN handshake OK -- all {role} motors responded.\n")
+    if missing:
+        print(f"\nNo data received yet for: {missing}")
+        print("Check the Teensy is powered, running teensy-forte's bilateral firmware, and that")
+        print(f"--wait-s (currently {args.wait_s}) covers at least one status-print cycle.")
 
-        positions = {bus_name: bus.sync_read("Present_Position") for bus_name, bus in buses.items()}
-
-        print(f"{'joint':<16} {'bus':>5} {'CAN id':>7} {'gear ratio':>11} {'link deg':>10} {'motor deg':>10}")
-        for joint_name, entry in JOINTS.items():
-            bus_name, slave_id, master_id, ratio = entry
-            can_id = slave_id if role == "slave" else master_id
-            motor_deg = positions[bus_name][joint_name]
-            link_deg = motor_deg / ratio
-            print(f"{joint_name:<16} {bus_name:>5} {can_id:>7} {ratio:>11.4f} {link_deg:>10.2f} {motor_deg:>10.2f}")
-
-        for bus in buses.values():
-            bus.disconnect(disable_torque=False)
-        print(f"{role} CAN buses disconnected.")
+    link.disconnect()
+    print("\nSerial link disconnected.")
 
     if not args.skip_camera:
         from lerobot.cameras.configs import ColorMode, Cv2Rotation

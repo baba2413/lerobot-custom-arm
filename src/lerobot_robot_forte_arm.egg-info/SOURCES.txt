@@ -6,6 +6,8 @@ src/lerobot_robot_forte_arm/motors_bus.py
 src/lerobot_robot_forte_arm/robot.py
 src/lerobot_robot_forte_arm/robstride_motors_bus.py
 src/lerobot_robot_forte_arm/smoke_test.py
+src/lerobot_robot_forte_arm/teensy_link.py
+src/lerobot_robot_forte_arm/teleop_master.py
 src/lerobot_robot_forte_arm/test.py
 src/lerobot_robot_forte_arm.egg-info/PKG-INFO
 src/lerobot_robot_forte_arm.egg-info/SOURCES.txt
