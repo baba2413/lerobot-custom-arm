@@ -9,7 +9,7 @@ from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from .config import JOINTS, ForteArmGoalConfig
-from .teensy_link import TeensyGoalLink
+from .teensy_link import TeensyGoalLink, wait_for_positions
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,14 @@ class ForteArmGoal(Robot):
     `observation_features`/`action_features` `.pos` values are raw motor-shaft degrees, matching
     `ForteArm`/`ForteArmMasterTeleop` exactly (no gear-ratio conversion anywhere in this pipeline)
     -- required so a policy trained on `ForteArm`'s recordings sees the same units here at eval
-    time. See ForteArm's docstring for why gear ratios aren't applied at all.
+    time. See ForteArm's docstring for why gear ratios aren't applied at all, and for why values
+    are also delta-from-this-session's-baseline rather than the motor's raw absolute reading
+    (`get_observation()` subtracts it; `send_action()` adds it back before calling
+    `TeensyGoalLink.send_goal()`, which still speaks absolute raw radians over UDP unchanged --
+    delta-vs-absolute is a host-side representation choice, not a wire-protocol one). This only
+    works if the arm is posed the same way at connect() as it was for the recordings a policy was
+    trained on -- match `ForteArm`'s starting pose, not wherever `goal` firmware's `'c'`
+    calibration (a separate, firmware-side concept for the safety clamp) happens to be centered.
     """
 
     config_class = ForteArmGoalConfig
@@ -47,6 +54,7 @@ class ForteArmGoal(Robot):
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
+        self._baseline_deg: dict[int, float] = {}
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -76,8 +84,9 @@ class ForteArmGoal(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
+        self._baseline_deg = wait_for_positions(self.link, self._slave_id.values())
         self._connected = True
-        logger.info(f"{self} connected.")
+        logger.info(f"{self} connected. Baseline: {self._baseline_deg}")
 
     @check_if_not_connected
     def disconnect(self) -> None:
@@ -134,7 +143,8 @@ class ForteArmGoal(Robot):
             age = self.link.age_s(slave_id)
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
-            obs_dict[f"{joint}.pos"] = positions[slave_id]  # raw motor-shaft degrees, no gear conversion
+            # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
+            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_deg[slave_id]
 
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()
@@ -145,10 +155,13 @@ class ForteArmGoal(Robot):
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        # action[f"{joint}.pos"] is already raw motor-shaft degrees -- no gear conversion, see
-        # class docstring -- so this is just a key rename from joint name to motor id.
+        # action[f"{joint}.pos"] is delta-from-baseline (no gear conversion either, see class
+        # docstring) -- add this session's baseline back to get the absolute raw motor degrees
+        # TeensyGoalLink.send_goal() actually sends over UDP.
         positions_deg = {
-            self._slave_id[joint]: action[f"{joint}.pos"] for joint in JOINTS if f"{joint}.pos" in action
+            self._slave_id[joint]: self._baseline_deg[self._slave_id[joint]] + action[f"{joint}.pos"]
+            for joint in JOINTS
+            if f"{joint}.pos" in action
         }
         self.link.send_goal(positions_deg)
         return {key: val for key, val in action.items() if key.endswith(".pos")}

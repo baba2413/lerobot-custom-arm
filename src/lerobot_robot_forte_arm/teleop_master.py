@@ -6,7 +6,7 @@ from lerobot.types import RobotAction
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from .config import JOINTS
-from .teensy_link import TeensyLink
+from .teensy_link import TeensyLink, wait_for_positions
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ class ForteArmMasterTeleop(Teleoperator):
     `action_features` values are raw motor-shaft degrees (whatever the Teensy's CAN feedback
     reports), not gear-adjusted joint/link degrees -- JOINTS' external gear ratios are recorded as
     hardware documentation only and are not applied anywhere in this pipeline. See ForteArm's
-    docstring for why.
+    docstring for why, and for why values are also delta-from-this-session's-baseline rather than
+    the motor's raw absolute reading.
     """
 
     config_class = ForteArmMasterTeleopConfig
@@ -47,6 +48,7 @@ class ForteArmMasterTeleop(Teleoperator):
         self.link = TeensyLink.get(config.port, config.baudrate)
         self._master_id = {joint: master_id for joint, (_slave_id, master_id, _ratio) in JOINTS.items()}
         self._connected = False
+        self._baseline_deg: dict[int, float] = {}
 
     @property
     def action_features(self) -> dict:
@@ -64,7 +66,9 @@ class ForteArmMasterTeleop(Teleoperator):
     def connect(self, calibrate: bool = True) -> None:
         logger.info(f"Connecting {self} to Teensy on {self.config.port} (read-only)...")
         self.link.connect()
+        self._baseline_deg = wait_for_positions(self.link, self._master_id.values())
         self._connected = True
+        logger.info(f"{self} connected. Baseline: {self._baseline_deg}")
 
     @property
     def is_calibrated(self) -> bool:
@@ -87,7 +91,8 @@ class ForteArmMasterTeleop(Teleoperator):
             age = self.link.age_s(master_id)
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
-            action[f"{joint}.pos"] = positions[master_id]  # raw motor-shaft degrees, no gear conversion
+            # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
+            action[f"{joint}.pos"] = positions[master_id] - self._baseline_deg[master_id]
         return action
 
     def send_feedback(self, feedback: dict) -> None:

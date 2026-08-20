@@ -206,10 +206,12 @@ that's the Teensy's ~1 Hz status print rate showing up in the data (`SMOLVLA_GUI
 a known limitation to fix (firmware side) before collecting data for a policy you actually care
 about.
 
-**Note on units:** recorded `.pos` values are raw motor-shaft degrees (whatever the Teensy's own
-CAN feedback reports) — this pipeline does not convert to link/joint-space degrees anywhere. See
+**Note on units:** recorded `.pos` values are motor-shaft degrees (whatever the Teensy's own CAN
+feedback reports) — this pipeline does not convert to link/joint-space degrees anywhere. See
 `SMOLVLA_GUIDE.md` §2 if you're comparing these numbers against the physical arm's real range of
-motion.
+motion. They're also **delta from this recording session's starting pose**, not the motor's raw
+absolute reading (see `SMOLVLA_GUIDE.md` §2 for why) — pose the arm the same way at the start of
+every session before connecting, or episodes recorded in different sessions won't line up.
 
 ---
 

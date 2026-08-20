@@ -9,7 +9,7 @@ from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from .config import JOINTS, ForteArmConfig
-from .teensy_link import TeensyLink
+from .teensy_link import TeensyLink, wait_for_positions
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,16 @@ class ForteArm(Robot):
     eval agree -- so there's no reason to add a unit conversion whose only real effect would be
     another way for a train/eval mismatch to sneak in (e.g. via SMOLVLA_GUIDE.md's still-unverified
     assumption that master and slave gear ratios even match).
+
+    Values are also **delta from this session's connect()-time baseline**, not the motor's raw
+    absolute reading -- the Robstride protocol's own `UNCALIBRATED` fault bit implies the absolute
+    reference isn't guaranteed stable across power cycles, so a dataset recorded across multiple
+    sessions in raw absolute terms could have the same `.pos` number mean a different physical
+    angle in different episodes. Delta-from-baseline is robust to that by construction: it only
+    requires the motor's rotation-to-radians *scale* to be stable (safe to assume), not its
+    absolute zero. See `wait_for_positions()` in teensy_link.py. This only works if the arm is
+    physically posed the same way at the start of every session before connect() -- delta cancels
+    an absolute-reference shift, not a genuinely different starting pose.
     """
 
     config_class = ForteArmConfig
@@ -49,6 +59,7 @@ class ForteArm(Robot):
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
+        self._baseline_deg: dict[int, float] = {}
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -78,8 +89,9 @@ class ForteArm(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
+        self._baseline_deg = wait_for_positions(self.link, self._slave_id.values())
         self._connected = True
-        logger.info(f"{self} connected (read-only -- see class docstring).")
+        logger.info(f"{self} connected (read-only -- see class docstring). Baseline: {self._baseline_deg}")
 
     @check_if_not_connected
     def disconnect(self) -> None:
@@ -123,7 +135,8 @@ class ForteArm(Robot):
             age = self.link.age_s(slave_id)
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
-            obs_dict[f"{joint}.pos"] = positions[slave_id]  # raw motor-shaft degrees, no gear conversion
+            # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
+            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_deg[slave_id]
 
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()

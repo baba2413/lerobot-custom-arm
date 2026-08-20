@@ -4,11 +4,48 @@ import re
 import socket
 import threading
 import time
-from typing import ClassVar
+from typing import ClassVar, Iterable, Protocol
 
 import serial
 
 logger = logging.getLogger(__name__)
+
+
+class _PositionSource(Protocol):
+    def get_positions_deg(self) -> dict[int, float]: ...
+
+
+def wait_for_positions(
+    link: _PositionSource, motor_ids: Iterable[int], timeout_s: float = 3.0
+) -> dict[int, float]:
+    """
+    Block until `link.get_positions_deg()` has a reading for every id in `motor_ids`, then return
+    that snapshot. Works with either `TeensyLink` or `TeensyGoalLink` (both share the
+    `get_positions_deg()` shape) via duck typing rather than a shared base class.
+
+    Used to establish a per-session position baseline at connect time -- see `ForteArm`/
+    `ForteArmMasterTeleop`/`ForteArmGoal`'s docstrings for why `.pos` is reported delta-from-this-
+    baseline rather than the motor's raw absolute reading: the Robstride protocol's own
+    `UNCALIBRATED` fault bit implies the absolute reference isn't guaranteed stable across power
+    cycles, so recording/commanding delta-from-session-start is robust to that drift by
+    construction, whether or not it actually turns out to matter on this hardware.
+
+    Raises TimeoutError if not all ids report within `timeout_s` -- fails loudly rather than
+    silently baselining against a partial/wrong snapshot.
+    """
+    motor_ids = list(motor_ids)
+    deadline = time.monotonic() + timeout_s
+    positions: dict[int, float] = {}
+    while time.monotonic() < deadline:
+        positions = link.get_positions_deg()
+        if all(m in positions for m in motor_ids):
+            return {m: positions[m] for m in motor_ids}
+        time.sleep(0.05)
+    missing = [m for m in motor_ids if m not in positions]
+    raise TimeoutError(
+        f"Timed out after {timeout_s}s waiting for initial position feedback for motor id(s) "
+        f"{missing} -- is the Teensy powered and running the right firmware?"
+    )
 
 # Matches the common prefix of teensy-forte's periodic status line, present on both the
 # `teleop-bi` and `teleop-bi-p-t` branches of teensy.ino, e.g.:

@@ -156,8 +156,27 @@ need real physical joint angles again (e.g. for kinematics, or human-authored sa
 recording/eval path itself.
 
 `ForteArm`, `ForteArmMasterTeleop`, and `ForteArmGoal` all expose exactly these 4 joints as
-`{joint}.pos` in **raw motor-shaft degrees**. Camera: one Intel RealSense (`cam_1`, serial
+`{joint}.pos` in raw motor-shaft degrees. Camera: one Intel RealSense (`cam_1`, serial
 `825312072171`, 640×480 @ 15 fps, RGB), attached to the slave side (it watches the task).
+
+**Values are also delta from that session's connect()-time baseline, not the motor's raw absolute
+reading.** The Robstride CAN protocol has an `UNCALIBRATED` fault bit (decoded in
+`printFaultBits()` on every branch) — its existence implies the motor's absolute position
+reference isn't guaranteed stable across power cycles, so a dataset recorded across multiple
+power-on sessions in raw *absolute* terms could have the same `.pos` number silently mean a
+different physical angle in different episodes. `wait_for_positions()` in `teensy_link.py`
+captures each motor's first reading at `connect()` as a per-session baseline; `get_observation()`/
+`get_action()` report `raw - baseline`, and `ForteArmGoal.send_action()` adds the baseline back
+before calling `TeensyGoalLink.send_goal()` (which still speaks absolute raw radians over UDP,
+unchanged — delta-vs-absolute is a host-side representation choice, not a wire-protocol one, so
+neither firmware branch needed to change for this). This is robust to the encoder's absolute
+reference drifting, by construction, whether or not it actually turns out to on this hardware — it
+only requires the motor's rotation-to-degrees *scale* to be stable, not its zero point.
+
+**This only works if the arm is physically posed the same way at the start of every session**
+(recording *and* eval) before `connect()` — delta cancels an absolute-reference shift between
+sessions, not a genuinely different starting pose. Pose consistency is still a manual/process
+requirement, not something the code can verify.
 
 When the other 3 joints get motors: add them to `JOINTS` in `config.py`, and to the Teensy's
 `MST_IDS_CAN*`/`SLV_IDS_CAN*` arrays.
