@@ -51,8 +51,20 @@ the Teensy's own USB-serial connection is the only link required (see `SMOLVLA_G
 
 **Which firmware for which phase:** Phases 0–8 (below) need `teensy-forte`'s **`teleop-bi-p-t`**
 branch flashed (bilateral teleop, `'e'`/`'d'`). Phase 9 (evaluation) needs a **different**,
-standalone firmware — the **`goal`** branch (single arm, `'g'`/`'d'`, no bilateral) — flashed
-instead; see Phase 9 for when to switch. Don't mix them up: they speak different serial protocols.
+standalone firmware — the **`goal`** branch (single arm, `'c'`/`'d'` over serial + goal positions
+over Ethernet UDP, no bilateral) — flashed instead; see Phase 9 for when to switch. Don't mix them
+up: they speak entirely different protocols.
+
+**Step 4b — ACTION: Pick and mark a physical "home" pose.**
+Every `.pos` value this pipeline records or sends is **delta from wherever the arm was posed the
+moment you connected**, not an absolute reading (see `SMOLVLA_GUIDE.md` §2 for why) — the Robstride
+motors' own absolute position reference isn't guaranteed stable across power cycles. This means: if
+you pose the arm differently at the start of two different sessions, `0.5` in one session's data
+and `0.5` in the other's don't mean the same physical angle. Pick one physical pose (e.g. "both
+arms hanging straight down," or against a mechanical stop) and **always** return the arm to it —
+by eye, or with a physical marker/fixture — right before connecting, for every recording session
+*and* every eval session for a given task. This is a manual discipline the code can't verify for
+you.
 
 ---
 
@@ -257,47 +269,51 @@ Confirm loss is decreasing and there's no immediate crash. OOM → lower `--batc
 
 The firmware capability this used to be blocked on now exists — a standalone goal-following
 firmware, `teensy-forte`'s **`goal`** branch, single arm only (no master, no bilateral logic), plus
-a matching `Robot` class (`ForteArmGoal`, `--robot.type=forte_arm_goal`). **It has not been flashed
-or run against real motors yet.** Treat every step below as a first-time bring-up, not a routine —
-go slowly, and don't skip the bench test to get to the policy faster.
+a matching `Robot` class (`ForteArmGoal`, `--robot.type=forte_arm_goal`). Protocol is hybrid, not
+serial-only: `'c'`/`'d'` (calibrate/disable) still go over USB serial, but the continuous
+goal-position stream goes over **Ethernet UDP** to the Teensy (static IP `192.168.1.15:5005`,
+direct cable, no gateway/router — referenced from `teensy-forte`'s `isaacsim-udp` branch). Per-joint
+safety limits (`JOINT_LIMIT_MIN/MAX_CAN1/CAN2` in `teensy.ino`) are configured with real values, not
+placeholders. **Still not run end-to-end with a trained policy as of this writing** — treat this as
+a careful first real run, not a routine.
 
-**Step 29 — ACTION: Flash the `goal` firmware.**
+**Step 29 — ACTION: Flash the `goal` firmware, connect Ethernet.**
 ```bash
 cd /home/daros/workspace2/teensy-forte
 git checkout goal
 # flash teensy/teensy.ino to the Teensy (Arduino IDE / Teensyduino, or your usual flashing method)
 ```
-(As of this writing the `goal` branch's firmware commits are local-only, not pushed to `origin` —
-if you're flashing from a different machine than where they were written, `git push` first.)
 This **replaces** `teleop-bi-p-t` on the Teensy — you cannot teleoperate or record more bilateral
-data until you reflash back to `teleop-bi-p-t` afterward. Confirm you're done with Phases 3–8 for
-this session before doing this.
+data until you reflash back afterward. Confirm you're done with Phases 3–8 for this session first.
+Also connect a direct Ethernet cable between the host and the Teensy — `'c'`/`'d'` work over USB
+alone, but nothing will move without the Ethernet link up (host static IP on the `192.168.1.0/24`
+subnet, e.g. `192.168.1.10`).
 
-**Step 30 — ACTION: Bench-test `'g'`/`'d'` manually before touching Python.**
+**Step 30 — ACTION: Pose the arm at your marked home position (Step 4b), then calibrate.**
 ```bash
 screen $TEENSY_PORT 115200
 ```
-- Type `g` and press Enter (bare). Confirm the arm holds its current pose — no jump, no motion.
-- Type `d`. Confirm it stops/disables cleanly.
-- Type `g` followed by 4 space-separated raw-radian targets, **one axis at a time** (i.e. change
-  only one of the 4 numbers a little from the arm's current position, leave the other 3 matching
-  its current pose) — confirm the physical joint that moves is the one you intended. Order is
-  `<yaw> <pitch> <roll> <elbow>` (motor ids 11, 13, 12, 14 — **not** ascending CAN-wiring order).
-  This is the first real-hardware check of that mapping, so check all 4 axes individually before
-  trusting a combined command.
-- Stop sending `g` lines and confirm the arm auto-stops within ~150ms (the watchdog) without you
-  typing `d`.
+Type `c`. Confirm each motor reports `zero set: 0.000 (<raw>) rad` and
+`Calibration complete. Per-joint limits now active relative to this pose.` If any motor reports
+`no CAN feedback yet -- FAILED`, don't proceed — that motor isn't communicating.
 
-**Step 31 — CHECK:** all four of the above behaved as expected. If any axis moved the wrong joint
-or the wrong direction, stop — that's a wiring/protocol mismatch to resolve (see
-`teensy-forte`'s `goal` branch `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before
-anything below.
+**Step 31 — ACTION: Bench-test the UDP goal stream before trusting a policy with it.**
+```bash
+uv run forte-arm-goal-limit-bench --port $TEENSY_PORT
+```
+Edit `MOTOR_ID`/`DIRECTION` at the top of `goal_limit_bench.py` to test one axis at a time (motor
+ids 11, 13, 12, 14 = yaw, pitch, roll, elbow — **not** ascending CAN-wiring order). It ramps that
+one motor slowly, holding the other three at their current position, watching for the firmware's
+own `[CANx JOINT LIMIT] ... clamped to [lo, hi]` line — confirming both that the correct physical
+joint moves in the direction you intended, and that the real per-joint clamp actually engages on
+hardware, not just in source. Repeat for all 4 axes before trusting a combined/policy-driven
+command. This script needs `--port` open for serial (status/log lines, `'d'` at the end) *and* the
+Ethernet link up for the actual UDP ramp — if Ethernet isn't connected it'll read status fine but
+nothing will move.
 
-**Step 32 — DECISION: Set real per-joint safety limits.**
-The only bound in the firmware today is the Robstride protocol's wide `RAW_LIMIT_MIN/MAX`
-(±12.4 rad) — not this arm's actual safe range of motion. Decide and implement real per-joint
-limits (firmware-side clamp, or a host-side pre-send clamp in `ForteArmGoal.send_action()`) before
-letting a policy — not a human at the bench — drive the arm. Not yet decided or implemented.
+**Step 32 — CHECK:** all four axes moved the correct joint in the correct direction, and the clamp
+fired at a sensible bound for each. If any axis is wrong, stop — that's a wiring/protocol mismatch
+to resolve (see `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before anything below.
 
 **Step 33 — RUN: rollout a trained policy.**
 ```bash
@@ -309,12 +325,20 @@ uv run lerobot-rollout \
 No `--teleop.*` flags — `ForteArmGoal` has no paired teleoperator. (`lerobot-eval` is for
 gym-style simulation environments despite the name — don't use it for a bare real robot.) To save
 the eval episodes as a dataset instead, use `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
-with `--teleop` simply omitted.
+with `--teleop` simply omitted. `connect()` waits for the arm's current position before it returns
+and uses it as the session's delta baseline (Step 4b) — make sure the arm is already at your marked
+home pose *before* this command starts, same as recording.
 
 **Step 34 — ACTION (safety): keep `'d'` reachable.**
-Same rule as Phase 3's kill switch — but note a second serial console will contend with whatever
-Python process holds the port right now (see `SMOLVLA_GUIDE.md` §4). Ctrl+C on the running
-`lerobot-rollout`/`lerobot-record` process is the practical stop, not a second concurrent reader.
+Same rule as Phase 3's kill switch, but note two things specific to this firmware:
+- A second serial console will contend with whatever Python process holds `--port` right now (see
+  `SMOLVLA_GUIDE.md` §4) — Ctrl+C on the running `lerobot-rollout`/`lerobot-record` process is the
+  practical stop, not a second concurrent reader.
+- `'d'` briefly ignores any UDP goal packet for 300ms after it's sent (`DISABLE_IGNORE_MS` in
+  teensy.ino), specifically so a straggler packet already in flight can't silently undo the
+  disable and re-enable the motors uncalibrated. You may see a
+  `"GOAL packet ignored (just disabled...)"` line right after disabling — that's this working as
+  intended, not an error.
 
 ---
 
@@ -326,5 +350,6 @@ Python process holds the port right now (see `SMOLVLA_GUIDE.md` §4). Ctrl+C on 
   before recording again.
 - **Want a real (non-steppy) dataset** → `SMOLVLA_GUIDE.md` §14 item 3 (fast/on-demand position
   report on `teleop-bi-p-t`). Still the highest-leverage data-quality fix, untouched this session.
-- **Want to actually run policies on the arm** → done in principle (Phase 9) — what's left is the
-  bench test (Step 30) and safety limits (Step 32), both still open.
+- **Want to actually run policies on the arm** → done in principle (Phase 9) — per-joint limits are
+  configured and the disable race is fixed, but nothing has been run end-to-end with a trained
+  policy yet. The per-axis bench test (Step 31) is the thing to actually do next, not skip.
