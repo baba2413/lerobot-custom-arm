@@ -218,12 +218,30 @@ that's the Teensy's ~1 Hz status print rate showing up in the data (`SMOLVLA_GUI
 a known limitation to fix (firmware side) before collecting data for a policy you actually care
 about.
 
+**Note on what `action`/`observation.state` actually are:**
+- `observation.state` comes from `ForteArm.get_observation()` — the **slave** arm's joint positions.
+- `action` comes from `ForteArmMasterTeleop.get_action()` — the **master** arm's joint positions
+  (what the human operator does). `ForteArm.send_action(action)` is also called every frame (LeRobot
+  always calls it), but it's a no-op that just echoes the action back unchanged — `teleop-bi-p-t`
+  has no way to actually command the slave, so it can't modify what gets recorded.
+
 **Note on units:** recorded `.pos` values are motor-shaft degrees (whatever the Teensy's own CAN
 feedback reports) — this pipeline does not convert to link/joint-space degrees anywhere. See
 `SMOLVLA_GUIDE.md` §2 if you're comparing these numbers against the physical arm's real range of
-motion. They're also **delta from this recording session's starting pose**, not the motor's raw
-absolute reading (see `SMOLVLA_GUIDE.md` §2 for why) — pose the arm the same way at the start of
-every session before connecting, or episodes recorded in different sessions won't line up.
+motion.
+
+They're also **delta from two independent, session-start baselines**, not the motor's raw absolute
+reading — `observation.state[i] = slave_raw[i] - slave_baseline[i]` (baseline captured once, at
+`ForteArm.connect()`), `action[i] = master_raw[i] - master_baseline[i]` (baseline captured once, at
+`ForteArmMasterTeleop.connect()`). These are two *separate* baselines, not one shared reference —
+they should closely track each other in a well-run session (the Teensy's own bilateral offset
+already makes the slave mirror the master, and Step 4b's home-pose discipline means both arms start
+each session at matching relative poses), but nothing in code checks that they actually do. See
+`SMOLVLA_GUIDE.md` §2 for why this is delta at all (the Robstride `UNCALIBRATED` fault bit implies
+the absolute position reference isn't stable across power cycles) — pose the arm the same way at
+the start of every session before connecting (Step 4b), or episodes recorded in different sessions
+won't line up. Camera frames (`cam_1`) are unaffected — only the float `.pos` features go through
+this.
 
 ---
 
