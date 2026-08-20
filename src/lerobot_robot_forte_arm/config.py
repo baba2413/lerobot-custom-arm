@@ -47,3 +47,31 @@ class ForteArmConfig(RobotConfig):
             )
         }
     )
+
+
+@RobotConfig.register_subclass("forte_arm_goal")
+@dataclass
+class ForteArmGoalConfig(RobotConfig):
+    # Serial port of the Teensy running teensy-forte's standalone GOAL-following firmware
+    # (`goal` branch -- single arm, no master, no bilateral teleop). Not compatible with the
+    # bilateral firmware ForteArmConfig points at -- different wire protocol.
+    port: str
+    baudrate: int = 115200
+
+    # If the Teensy hasn't reported a motor's position in longer than this, get_observation()
+    # logs a warning (the stale value is still returned -- there's currently no fresher source).
+    stale_after_s: float = 3.0
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "cam_1": RealSenseCameraConfig(
+                serial_number_or_name="825312072171",
+                fps=15,
+                width=640,
+                height=480,
+                color_mode=ColorMode.RGB,
+                use_depth=False,
+                rotation=Cv2Rotation.NO_ROTATION,
+            )
+        }
+    )

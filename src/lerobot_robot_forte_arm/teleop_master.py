@@ -31,6 +31,11 @@ class ForteArmMasterTeleop(Teleoperator):
     Read-only by design: the Teensy already owns torque/haptic-feedback control of the master
     motors as part of its bilateral loop. This class never writes anything to the bus (there's no
     serial command for it to use even if it wanted to -- see ForteArm's docstring).
+
+    `action_features` values are raw motor-shaft degrees (whatever the Teensy's CAN feedback
+    reports), not gear-adjusted joint/link degrees -- JOINTS' external gear ratios are recorded as
+    hardware documentation only and are not applied anywhere in this pipeline. See ForteArm's
+    docstring for why.
     """
 
     config_class = ForteArmMasterTeleopConfig
@@ -40,8 +45,8 @@ class ForteArmMasterTeleop(Teleoperator):
         super().__init__(config)
         self.config = config
         self.link = TeensyLink.get(config.port, config.baudrate)
-        self._gear_ratio = {joint: ratio for joint, (_slave_id, _master_id, ratio) in JOINTS.items()}
         self._master_id = {joint: master_id for joint, (_slave_id, master_id, _ratio) in JOINTS.items()}
+        self._connected = False
 
     @property
     def action_features(self) -> dict:
@@ -53,12 +58,13 @@ class ForteArmMasterTeleop(Teleoperator):
 
     @property
     def is_connected(self) -> bool:
-        return self.link.is_connected
+        return self._connected
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         logger.info(f"Connecting {self} to Teensy on {self.config.port} (read-only)...")
         self.link.connect()
+        self._connected = True
 
     @property
     def is_calibrated(self) -> bool:
@@ -81,7 +87,7 @@ class ForteArmMasterTeleop(Teleoperator):
             age = self.link.age_s(master_id)
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
-            action[f"{joint}.pos"] = positions[master_id] / self._gear_ratio[joint]
+            action[f"{joint}.pos"] = positions[master_id]  # raw motor-shaft degrees, no gear conversion
         return action
 
     def send_feedback(self, feedback: dict) -> None:
@@ -91,4 +97,5 @@ class ForteArmMasterTeleop(Teleoperator):
     @check_if_not_connected
     def disconnect(self) -> None:
         self.link.disconnect()
+        self._connected = False
         logger.info(f"{self} disconnected.")

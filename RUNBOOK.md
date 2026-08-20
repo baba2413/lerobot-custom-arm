@@ -49,6 +49,11 @@ variant before switching on). Plug the Teensy into the host PC via USB. Do not s
 Note: unlike an earlier draft of this runbook, **no separate CAN adapter is needed on the host** —
 the Teensy's own USB-serial connection is the only link required (see `SMOLVLA_GUIDE.md` §1).
 
+**Which firmware for which phase:** Phases 0–8 (below) need `teensy-forte`'s **`teleop-bi-p-t`**
+branch flashed (bilateral teleop, `'e'`/`'d'`). Phase 9 (evaluation) needs a **different**,
+standalone firmware — the **`goal`** branch (single arm, `'g'`/`'d'`, no bilateral) — flashed
+instead; see Phase 9 for when to switch. Don't mix them up: they speak different serial protocols.
+
 ---
 
 ## Phase 1 — Software environment (one-time)
@@ -89,8 +94,8 @@ uv run forte-arm-smoke-test --port $TEENSY_PORT
 **Step 9 — CHECK:**
 All 4 joints show a slave *and* a master position (8 numbers total). If some are missing:
 - Re-run with `--wait-s 6` in case you just caught it between status prints.
-- Confirm the Teensy is powered and running `teensy-forte`'s `teleop-bi` (or `teleop-bi-p-t`)
-  firmware — open its serial console directly (step 12) and watch for status/fault lines.
+- Confirm the Teensy is powered and running `teensy-forte`'s `teleop-bi-p-t` firmware — open its
+  serial console directly (step 12) and watch for status/fault lines.
 
 Camera line should print `frame shape (480, 640, 3)`.
 
@@ -196,9 +201,15 @@ You don't need to manually move or collect anything.
 
 **Step 24 — CHECK: Expect "steppy" data.**
 The joint trajectories in this dataset will visibly hold a value for several frames then jump —
-that's the Teensy's ~1 Hz status print rate showing up in the data (`SMOLVLA_GUIDE.md` §1, §14),
-not a bug in the recording. Fine for validating the pipeline end-to-end; treat it as a known
-limitation to fix (firmware side) before collecting data for a policy you actually care about.
+that's the Teensy's ~1 Hz status print rate showing up in the data (`SMOLVLA_GUIDE.md` §1,
+§14 item 3), not a bug in the recording. Fine for validating the pipeline end-to-end; treat it as
+a known limitation to fix (firmware side) before collecting data for a policy you actually care
+about.
+
+**Note on units:** recorded `.pos` values are raw motor-shaft degrees (whatever the Teensy's own
+CAN feedback reports) — this pipeline does not convert to link/joint-space degrees anywhere. See
+`SMOLVLA_GUIDE.md` §2 if you're comparing these numbers against the physical arm's real range of
+motion.
 
 ---
 
@@ -209,8 +220,10 @@ If pushed to the Hub, open https://huggingface.co/spaces/lerobot/visualize_datas
 `${HF_USER}/forte_<TASK_NAME>`. Look through several episodes for anything beyond the expected
 steppiness: missing/blurry camera frames, the object not at its marked start position, etc.
 
-**Note:** `lerobot-replay` does not work yet — see `SMOLVLA_GUIDE.md` §3/§14. There's currently no
-way for the host to command the slave to a position, which replay needs.
+**Note:** `lerobot-replay` does not work on `forte_arm` — see `SMOLVLA_GUIDE.md` §3/§1. The
+`teleop-bi-p-t` firmware this dataset was recorded against has no way for the host to command the
+slave to a position, which replay needs. It should work via `forte_arm_goal`/`goal` firmware
+instead (§1a, §12) — not yet verified as of this writing.
 
 ---
 
@@ -238,25 +251,78 @@ Confirm loss is decreasing and there's no immediate crash. OOM → lower `--batc
 
 ---
 
-## Phase 9 — Evaluation: blocked until the firmware supports position commands
+## Phase 9 — Evaluation on the real arm
 
-**Step 29 — Stop here for now.** Running the trained policy against the real slave arm
-(`lerobot-record --policy.path=...`) needs `ForteArm` to be able to command a goal position, and
-the current `teensy-forte` firmware has no serial command for that — only `'e'`/`'d'`. See
-`SMOLVLA_GUIDE.md` §14 for what needs to be added to `teensy.ino` before this phase can be written.
-Once that firmware change exists, this runbook gets a real Phase 9 (safety-limit setup, disabling
-the Teensy's own control loop, running eval episodes, scoring success rate) mirroring the training
-data collection above.
+The firmware capability this used to be blocked on now exists — a standalone goal-following
+firmware, `teensy-forte`'s **`goal`** branch, single arm only (no master, no bilateral logic), plus
+a matching `Robot` class (`ForteArmGoal`, `--robot.type=forte_arm_goal`). **It has not been flashed
+or run against real motors yet.** Treat every step below as a first-time bring-up, not a routine —
+go slowly, and don't skip the bench test to get to the policy faster.
+
+**Step 29 — ACTION: Flash the `goal` firmware.**
+```bash
+cd /home/daros/workspace2/teensy-forte
+git checkout goal
+# flash teensy/teensy.ino to the Teensy (Arduino IDE / Teensyduino, or your usual flashing method)
+```
+(As of this writing the `goal` branch's firmware commits are local-only, not pushed to `origin` —
+if you're flashing from a different machine than where they were written, `git push` first.)
+This **replaces** `teleop-bi-p-t` on the Teensy — you cannot teleoperate or record more bilateral
+data until you reflash back to `teleop-bi-p-t` afterward. Confirm you're done with Phases 3–8 for
+this session before doing this.
+
+**Step 30 — ACTION: Bench-test `'g'`/`'d'` manually before touching Python.**
+```bash
+screen $TEENSY_PORT 115200
+```
+- Type `g` and press Enter (bare). Confirm the arm holds its current pose — no jump, no motion.
+- Type `d`. Confirm it stops/disables cleanly.
+- Type `g` followed by 4 space-separated raw-radian targets, **one axis at a time** (i.e. change
+  only one of the 4 numbers a little from the arm's current position, leave the other 3 matching
+  its current pose) — confirm the physical joint that moves is the one you intended. Order is
+  `<yaw> <pitch> <roll> <elbow>` (motor ids 11, 13, 12, 14 — **not** ascending CAN-wiring order).
+  This is the first real-hardware check of that mapping, so check all 4 axes individually before
+  trusting a combined command.
+- Stop sending `g` lines and confirm the arm auto-stops within ~150ms (the watchdog) without you
+  typing `d`.
+
+**Step 31 — CHECK:** all four of the above behaved as expected. If any axis moved the wrong joint
+or the wrong direction, stop — that's a wiring/protocol mismatch to resolve (see
+`teensy-forte`'s `goal` branch `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before
+anything below.
+
+**Step 32 — DECISION: Set real per-joint safety limits.**
+The only bound in the firmware today is the Robstride protocol's wide `RAW_LIMIT_MIN/MAX`
+(±12.4 rad) — not this arm's actual safe range of motion. Decide and implement real per-joint
+limits (firmware-side clamp, or a host-side pre-send clamp in `ForteArmGoal.send_action()`) before
+letting a policy — not a human at the bench — drive the arm. Not yet decided or implemented.
+
+**Step 33 — RUN: rollout a trained policy.**
+```bash
+uv run lerobot-rollout \
+  --robot.type=forte_arm_goal --robot.port=$TEENSY_PORT --robot.id=forte_v1 \
+  --policy.path=outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/last/pretrained_model \
+  --fps=15 --display_data=true
+```
+No `--teleop.*` flags — `ForteArmGoal` has no paired teleoperator. (`lerobot-eval` is for
+gym-style simulation environments despite the name — don't use it for a bare real robot.) To save
+the eval episodes as a dataset instead, use `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
+with `--teleop` simply omitted.
+
+**Step 34 — ACTION (safety): keep `'d'` reachable.**
+Same rule as Phase 3's kill switch — but note a second serial console will contend with whatever
+Python process holds the port right now (see `SMOLVLA_GUIDE.md` §4). Ctrl+C on the running
+`lerobot-rollout`/`lerobot-record` process is the practical stop, not a second concurrent reader.
 
 ---
 
 ## Phase 10 — Iterate on what you can control today
 
-**Step 30 — DECISION:**
+**Step 35 — DECISION:**
 - **Dataset quality concerns beyond the expected steppiness** (camera framing, object placement
   consistency, operator technique) → fix the physical setup (Phase 0) or practice more (Phase 5)
   before recording again.
-- **Want a real (non-steppy) dataset** → that's the firmware fix in `SMOLVLA_GUIDE.md` §14,
-  item 1. It's the highest-leverage next step for the whole project.
-- **Want to actually run policies on the arm** → `SMOLVLA_GUIDE.md` §14, item 2 (goal-position
-  serial command), on top of item 1.
+- **Want a real (non-steppy) dataset** → `SMOLVLA_GUIDE.md` §14 item 3 (fast/on-demand position
+  report on `teleop-bi-p-t`). Still the highest-leverage data-quality fix, untouched this session.
+- **Want to actually run policies on the arm** → done in principle (Phase 9) — what's left is the
+  bench test (Step 30) and safety limits (Step 32), both still open.

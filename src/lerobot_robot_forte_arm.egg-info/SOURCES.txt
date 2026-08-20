@@ -2,8 +2,10 @@ pyproject.toml
 src/lerobot_robot_forte_arm/__init__.py
 src/lerobot_robot_forte_arm/camera.py
 src/lerobot_robot_forte_arm/config.py
+src/lerobot_robot_forte_arm/goal_limit_bench.py
 src/lerobot_robot_forte_arm/motors_bus.py
 src/lerobot_robot_forte_arm/robot.py
+src/lerobot_robot_forte_arm/robot_goal.py
 src/lerobot_robot_forte_arm/robstride_motors_bus.py
 src/lerobot_robot_forte_arm/smoke_test.py
 src/lerobot_robot_forte_arm/teensy_link.py

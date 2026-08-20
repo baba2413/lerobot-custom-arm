@@ -28,6 +28,15 @@ class ForteArm(Robot):
     Standalone closed-loop policy control (a trained policy directly commanding the slave with no
     human on the master) is NOT possible with the firmware as it stands today -- that needs a new
     goal-position serial command added to teensy.ino first. See SMOLVLA_GUIDE.md.
+
+    `observation_features`'/`action_features` `.pos` values are raw motor-shaft degrees (whatever
+    the Teensy's CAN feedback reports), not gear-adjusted joint/link degrees. JOINTS' external gear
+    ratios describe the real hardware but are deliberately not applied here: this pipeline only
+    ever needs to record what a motor did and later reproduce it on the same motor, and a trained
+    policy doesn't care whether that number is "physically real" degrees, only that recording and
+    eval agree -- so there's no reason to add a unit conversion whose only real effect would be
+    another way for a train/eval mismatch to sneak in (e.g. via SMOLVLA_GUIDE.md's still-unverified
+    assumption that master and slave gear ratios even match).
     """
 
     config_class = ForteArmConfig
@@ -37,9 +46,9 @@ class ForteArm(Robot):
         super().__init__(config)
         self.config = config
         self.link = TeensyLink.get(config.port, config.baudrate)
-        self._gear_ratio = {joint: ratio for joint, (_slave_id, _master_id, ratio) in JOINTS.items()}
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
+        self._connected = False
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -61,7 +70,7 @@ class ForteArm(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self.link.is_connected and all(cam.is_connected for cam in self.cameras.values())
+        return self._connected and all(cam.is_connected for cam in self.cameras.values())
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
@@ -69,6 +78,7 @@ class ForteArm(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
+        self._connected = True
         logger.info(f"{self} connected (read-only -- see class docstring).")
 
     @check_if_not_connected
@@ -76,6 +86,7 @@ class ForteArm(Robot):
         self.link.disconnect()
         for cam in self.cameras.values():
             cam.disconnect()
+        self._connected = False
         logger.info(f"{self} disconnected.")
 
     @property
@@ -112,7 +123,7 @@ class ForteArm(Robot):
             age = self.link.age_s(slave_id)
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
-            obs_dict[f"{joint}.pos"] = positions[slave_id] / self._gear_ratio[joint]
+            obs_dict[f"{joint}.pos"] = positions[slave_id]  # raw motor-shaft degrees, no gear conversion
 
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()

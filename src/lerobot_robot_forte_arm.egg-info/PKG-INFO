@@ -5,4 +5,4 @@ Summary: forte arm with LeRobot VLA
 Requires-Python: >=3.12
 Requires-Dist: torch
 Requires-Dist: numpy
-Requires-Dist: lerobot[intelrealsense,pyserial-dep] @ file:///home/daros/workspace2/lerobot
+Requires-Dist: lerobot[dataset,hardware,intelrealsense,viz] @ file:///home/daros/workspace2/lerobot

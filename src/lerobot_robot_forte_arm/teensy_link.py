@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+import socket
 import threading
 import time
 from typing import ClassVar
@@ -156,3 +157,179 @@ class TeensyLink:
                 self._positions_deg[slave_id] = slave_deg
                 self._last_update[master_id] = now
                 self._last_update[slave_id] = now
+
+
+# Matches the standalone GOAL-following firmware's status line (`goal` branch of teensy-forte),
+# e.g.:
+#   [CAN1] Slave 11 Pos: 0.123 (0.123) rad | Target: 0.125 (0.125) rad (GOAL / CALIB_OK) | Trq: 0.05 Nm
+# Pos/Target are printed as "radian_after_calibration (original_radian)" -- this only needs the
+# raw (parenthesized) value, since TeensyGoalLink works in raw motor-shaft units throughout (see
+# send_goal()'s docstring). Only motor_id/pos are captured -- Target and the mode/calib flags
+# aren't consumed anywhere in this class, and capturing them added fragility for no benefit: an
+# earlier version of this regex tried to also capture the mode word and silently stopped matching
+# at all the moment the status line grew a second "/ CALIB_OK" flag, since `\w+` can't span the
+# space and slash -- caught while making this change, not by anything noticing it break.
+# This firmware has no master arm, so this is deliberately a different regex from _STATUS_RE
+# rather than stretching that one (or having the firmware print fake master data) to fit.
+_GOAL_STATUS_RE = re.compile(
+    r"Slave\s+(?P<motor_id>\d+)\s+Pos:\s*-?[\d.]+\s*\(\s*(?P<pos>-?[\d.]+)\s*\)\s*rad"
+)
+
+# Wire order the GOAL firmware expects in a UDP goal packet ("<yaw>,<pitch>,<roll>,<elbow>"):
+# kinematic order, NOT CAN-bus wiring order -- teensy.ino's SLV_IDS_CAN1={11,12}/
+# SLV_IDS_CAN2={13,14} groups yaw+roll together and pitch+elbow together, but
+# handleGoalPacket() unswaps 12/13 so the wire payload reads yaw, pitch, roll, elbow. Kept as
+# its own constant rather than importing JOINTS -- like TeensyLink, this module stays
+# gear-ratio- and joint-name-agnostic; that mapping is a robot.py-layer concern.
+GOAL_MOTOR_ORDER: tuple[int, int, int, int] = (11, 13, 12, 14)  # yaw, pitch, roll, elbow
+
+
+class TeensyGoalLink:
+    """
+    Connection to the Teensy running the standalone GOAL-following firmware (`goal` branch of
+    teensy-forte, single slave arm, no master/bilateral logic -- see that branch's teensy.ino
+    header comment). Deliberately a separate class from `TeensyLink`, not a variant of it: the
+    wire protocol differs entirely, and since this firmware has no master arm there is only ever
+    one Python-side consumer during eval, so this class owns its connections directly instead of
+    reference-counting like `TeensyLink` has to.
+
+    Hybrid transport, matching the firmware's split (referenced from teensy-forte's isaacsim-udp
+    branch, which solved the same "one channel, two jobs" problem we hit when goal-streaming
+    briefly lived on serial -- see git history on the `goal` branch for what that cost):
+      - USB serial: `calibrate()` ('c') / `disable()` ('d'), single-char, human-supervised. Also
+        the source of `get_positions_deg()`'s telemetry (the firmware's periodic status line).
+      - Ethernet UDP: `send_goal()`, the continuous goal-position stream. Fire-and-forget
+        datagrams to (UDP_HOST, UDP_PORT) -- no connection/handshake/delivery guarantee, matching
+        the firmware's stateless, watchdog-protected design (GOAL_TIMEOUT_MS = 500ms in
+        teensy.ino): a dropped packet just means the next one takes over.
+
+    Like `TeensyLink`, this class works entirely in raw motor-shaft units (radians for commands,
+    degrees for `get_positions_deg()`, matching that class's convention) and knows nothing about
+    gear ratios or joint names -- callers convert via `config.JOINTS` before calling `send_goal()`.
+    """
+
+    UDP_HOST = "192.168.1.15"  # matches teensy.ino's static IP (staticIP, direct-cable setup)
+    UDP_PORT = 5005
+
+    def __init__(self, port: str, baudrate: int = 115200):
+        self.port = port
+        self.baudrate = baudrate
+        self._serial: serial.Serial | None = None
+        self._udp_sock: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._positions_deg: dict[int, float] = {}
+        self._last_update: dict[int, float] = {}
+        self._reader_thread: threading.Thread | None = None
+        self._stop_reader = threading.Event()
+
+    @property
+    def is_connected(self) -> bool:
+        return self._serial is not None and self._serial.is_open and self._udp_sock is not None
+
+    def connect(self) -> None:
+        if self._serial is not None:
+            return
+        self._serial = serial.Serial(self.port, self.baudrate, timeout=0.2)
+        self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._stop_reader.clear()
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+        logger.info(
+            f"TeensyGoalLink connected: serial {self.port} @ {self.baudrate}, "
+            f"UDP -> {self.UDP_HOST}:{self.UDP_PORT}."
+        )
+
+    def disconnect(self) -> None:
+        if self._serial is None:
+            return
+        self._stop_reader.set()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.0)
+            self._reader_thread = None
+        self._serial.close()
+        self._serial = None
+        if self._udp_sock is not None:
+            self._udp_sock.close()
+            self._udp_sock = None
+        logger.info(f"TeensyGoalLink disconnected from {self.port}.")
+
+    def calibrate(self) -> None:
+        """Send 'c' over serial: capture the arm's current pose as each motor's software zero
+        (offset only, no physical move). Needed for the firmware's per-joint limit clamp to be
+        enforced -- see RUNBOOK.md Phase 9."""
+        self._write_serial(b"c")
+
+    def disable(self) -> None:
+        """Send 'd' over serial: stop and disable. Also clears calibration on the firmware side --
+        call calibrate() again before the next send_goal() if you want the limit clamp back."""
+        self._write_serial(b"d")
+
+    def enable(self) -> None:
+        """Enter GOAL mode holding the arm's current position -- the UDP-era equivalent of the old
+        bare serial 'g'. There's no "hold current position" concept in the firmware's UDP protocol
+        (every packet must carry 4 real values), so this reads the last known position from
+        get_positions_deg() and sends that straight back as the first goal. Requires at least one
+        status line to have arrived first (i.e. call this after connect(), not immediately at it)."""
+        positions = self.get_positions_deg()
+        missing = [m for m in GOAL_MOTOR_ORDER if m not in positions]
+        if missing:
+            raise RuntimeError(
+                f"TeensyGoalLink({self.port}): no known position yet for motor id(s) {missing} -- "
+                "wait for at least one status line (printed ~1x/second) before calling enable()."
+            )
+        self.send_goal(positions)
+
+    def send_goal(self, positions_deg: dict[int, float]) -> None:
+        """
+        Send one goal-position UDP packet. `positions_deg` must have exactly the four keys in
+        GOAL_MOTOR_ORDER (raw motor-shaft degrees, not gear-adjusted -- same convention as
+        get_positions_deg()). Also enters GOAL mode if not already in it (see teensy.ino's
+        handleGoalPacket()), so calling this alone is enough to both arm and start moving the arm.
+
+        Call this at your control-loop rate (e.g. once per policy inference step) -- the firmware
+        auto-disables if it doesn't see a new goal packet within GOAL_TIMEOUT_MS (500ms). UDP is
+        fire-and-forget: this does not block and does not confirm delivery.
+        """
+        if self._udp_sock is None:
+            raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
+        values_rad = [math.radians(positions_deg[motor_id]) for motor_id in GOAL_MOTOR_ORDER]
+        payload = ",".join(f"{v:.4f}" for v in values_rad)
+        self._udp_sock.sendto(payload.encode("ascii"), (self.UDP_HOST, self.UDP_PORT))
+
+    def _write_serial(self, data: bytes) -> None:
+        if self._serial is None:
+            raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
+        self._serial.write(data)
+
+    def get_positions_deg(self) -> dict[int, float]:
+        """Latest known position per CAN motor id, in degrees. Non-blocking; may be stale -- see
+        age_s(). Sourced from the firmware's periodic serial status line, independent of the UDP
+        goal stream."""
+        with self._lock:
+            return dict(self._positions_deg)
+
+    def age_s(self, motor_id: int) -> float | None:
+        """Seconds since the last update for this motor id, or None if never received."""
+        with self._lock:
+            last = self._last_update.get(motor_id)
+        return None if last is None else time.monotonic() - last
+
+    def _reader_loop(self) -> None:
+        assert self._serial is not None
+        while not self._stop_reader.is_set():
+            try:
+                raw = self._serial.readline()
+            except serial.SerialException:
+                break
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="ignore")
+            match = _GOAL_STATUS_RE.search(line)
+            if not match:
+                continue
+            now = time.monotonic()
+            motor_id = int(match["motor_id"])
+            pos_deg = math.degrees(float(match["pos"]))
+            with self._lock:
+                self._positions_deg[motor_id] = pos_deg
+                self._last_update[motor_id] = now

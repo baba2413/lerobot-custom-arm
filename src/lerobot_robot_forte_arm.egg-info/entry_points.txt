@@ -1,2 +1,3 @@
 [console_scripts]
+forte-arm-goal-limit-bench = lerobot_robot_forte_arm.goal_limit_bench:main
 forte-arm-smoke-test = lerobot_robot_forte_arm.smoke_test:main
