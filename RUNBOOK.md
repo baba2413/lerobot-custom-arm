@@ -20,7 +20,16 @@ value in by hand, every single time you see one of these in a command below:
   Teensy re-enumerates, so re-check with Step 7's `ls` rather than trusting a value from earlier in
   the session.
 - `<HF_USER>` — your Hugging Face username, e.g. `jsmith` (found in Step 6).
-- `<TASK_NAME>` — a short slug for the task you're teaching, e.g. `pick_cube` (chosen in Step 22).
+- `<TASK_NAME>` — a short slug for the task you're teaching, e.g. `pick_cube` (chosen in Step 20).
+  **This is not a category label — it's the literal, exact name of one specific dataset.** It must
+  be the *same exact string* in `lerobot-record` (Step 21, where it's chosen) and later in
+  `lerobot-train` (Step 26) and `lerobot-rollout`/`lerobot-record --policy.path=...` (Phase 9) —
+  `lerobot-train` doesn't know what `pick_cube` "means," it just needs `<HF_USER>/forte_<TASK_NAME>`
+  to resolve to an actual dataset that exists. If you append a timestamp at record time to avoid
+  collisions between attempts (e.g. `movegear_20260820_230138` instead of plain `movegear`), that
+  timestamp is part of `<TASK_NAME>` from then on — check `ls
+  ~/.cache/huggingface/lerobot/<HF_USER>/` (Phase 6b) for the exact string if you're not sure which
+  recording you're pointing at.
 
 (An earlier version of this runbook had you `export HF_USER=...`/`export TEENSY_PORT=...` once and
 reuse the shell variable everywhere below. That's gone — the auto-detection command
@@ -341,6 +350,11 @@ instead (§1a, §12) — not yet verified as of this writing.
 ---
 
 ## Phase 8 — Train SmolVLA
+
+**`<TASK_NAME>` here must be the exact dataset you're training on** — the same literal string you
+passed to `--dataset.repo_id` in Step 21, timestamp suffix and all if you used one. If you're not
+sure which of your recordings you want, check Phase 6b first (`ls`, `total_episodes`) rather than
+guessing.
 
 **Step 26 — RUN:**
 ```bash
