@@ -94,6 +94,11 @@ you.
 cd /home/daros/workspace2/lerobot_robot_forte_arm
 uv sync
 ```
+`pyproject.toml`'s `lerobot[...]` extras list already covers everything this runbook needs
+(camera, viz, dataset recording, and SmolVLA training). If a later step still fails with
+`ImportError: '<package>' is required but not installed` anyway, that extra fell out of
+`pyproject.toml` somehow — add it back to the `lerobot[...]` list and re-run `uv sync`; see
+`SMOLVLA_GUIDE.md` §13 for the extra-name-to-package mapping we've hit so far.
 
 **Step 6 — DECISION: Push datasets to the Hugging Face Hub, or stay fully local?**
 - **Push to Hub (recommended — easier to visualize/share):**
@@ -375,6 +380,15 @@ Confirm loss is decreasing and there's no immediate crash. OOM → lower `--batc
 **Step 28 — ACTION: Let it train** 5–10 epochs over the dataset as a first pass (see
 `lerobot/AGENT_GUIDE.md` §7 for the steps↔epochs math). Checkpoints land in
 `outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/`.
+
+**If Step 26 fails immediately with `FileExistsError: Output directory ... already exists`:** a
+previous attempt at this same `<TASK_NAME>` already created `--output_dir` (even a crash right
+after startup creates the directory and starts a wandb run before failing — no real checkpoints in
+it). Check first: `ls outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/` — if that's empty/
+missing, the old attempt never got anywhere and it's safe to `rm -rf
+outputs/train/smolvla_forte_<TASK_NAME>` and re-run Step 26. If there *are* checkpoints you want to
+keep, don't delete — either pass `--resume=true` to continue that run, or pick a different
+`--output_dir`/`--job_name` for this attempt instead.
 
 ---
 

@@ -242,12 +242,16 @@ uv sync
 ```
 
 Requires Python ≥3.12 (matches `lerobot`'s own requirement). `pyproject.toml` depends on the local
-`lerobot` checkout with the `intelrealsense`, `hardware`, `viz`, and `dataset` extras:
+`lerobot` checkout with the `intelrealsense`, `hardware`, `viz`, `dataset`, `training`, and
+`smolvla` extras:
 - `intelrealsense` — the RealSense camera SDK bindings.
 - `hardware` — bundles `pyserial-dep` (the `serial` package `teensy_link.py` uses), `pynput-dep`
   (keyboard control during `lerobot-record`), and `deepdiff-dep`.
 - `viz` — `rerun-sdk`, needed for `--display_data=true` on `lerobot-teleoperate`/`lerobot-record`.
 - `dataset` — `datasets` and friends, needed by `lerobot-record` to actually write episodes.
+- `training` — `accelerate`, `wandb`, and friends, needed by `lerobot-train` (Step 26).
+- `smolvla` — `transformers`, `tokenizers`, and friends, needed by
+  `lerobot-train --policy.type=smolvla` specifically (on top of `training`, not instead of it).
 
 (Earlier drafts also pulled in the `robstride` extra for direct CAN access via `python-can`;
 that's gone now — nothing in this package touches CAN or python-can anymore.)
@@ -408,7 +412,10 @@ Two things to keep in mind that don't apply to the bilateral firmware:
 | `ImportError: 'rerun-sdk' is required but not installed` on `--display_data=true` | Missing the `viz` extra (§5). | `uv sync` after confirming `pyproject.toml` includes `lerobot[...,viz,...]`. |
 | `ImportError: 'datasets' is required but not installed` on `lerobot-record` | Missing the `dataset` extra (§5). | Same fix, add `dataset` to the extras list. |
 | `ModuleNotFoundError: No module named 'pynput'` (usually appears as a second exception masking a real error) | Missing the `hardware` extra's `pynput-dep` (§5) — needed for keyboard control during recording. | Add `hardware` (not just `pyserial-dep`) to the extras list. |
-| `PermissionError: [Errno 13] Permission denied: '/forte_<task>_<timestamp>'` on `lerobot-record` | `$HF_USER` was empty when `--dataset.repo_id=${HF_USER}/forte_<task>` was expanded, so the repo id became `/forte_<task>` (leading slash) — `pathlib` then treats it as absolute when joined against the cache root, and `lerobot-record` tries to `mkdir` at filesystem `/`. | `echo $HF_USER` before running; see §9 for the full explanation. |
+| `ImportError: 'accelerate' is required but not installed` on `lerobot-train` | Missing the `training` extra (§5). | Add `training` to the extras list, `uv sync`. |
+| `ImportError: 'transformers' is required but not installed` on `lerobot-train --policy.type=smolvla` | Missing the `smolvla` extra (§5) — SmolVLA's own dependencies (transformers, tokenizers, etc.) aren't pulled in by `training` alone. | Add `smolvla` to the extras list, `uv sync`. |
+| `FileExistsError: Output directory outputs/train/... already exists and resume is False` on `lerobot-train` | A previous attempt at the same `--output_dir`/`<TASK_NAME>` already created that directory — including a crash right at startup (e.g. the two rows above), which creates the directory and starts a wandb run before failing, with no real checkpoints in it. | Check `outputs/train/.../checkpoints/` first. Empty/missing → `rm -rf` the stale directory and re-run. Has real checkpoints you want → `--resume=true` instead, or pick a new `--output_dir`/`--job_name`. See RUNBOOK.md Step 26. |
+| `PermissionError: [Errno 13] Permission denied: '/forte_<task>_<timestamp>'` on `lerobot-record` | `$HF_USER` was empty when `--dataset.repo_id=${HF_USER}/forte_<task>` was expanded, so the repo id became `/forte_<task>` (leading slash) — `pathlib` then treats it as absolute when joined against the cache root, and `lerobot-record` tries to `mkdir` at filesystem `/`. This specific failure mode is gone now that RUNBOOK.md has you type `<HF_USER>` in literally instead of expanding a shell variable (an empty literal would just 404, not silently become `/`) — noted here in case old scripts/aliases still `export`/expand it. | See §9 for the full explanation. |
 | `lerobot-find-cameras` (no argument) fails on RealSense with `ioctl(VIDIOC_QBUF): Bad file descriptor` / `read failed` spam | The RealSense exposes several `/dev/videoN` nodes (one per sub-stream); the bare form also scans for OpenCV/UVC cameras and tries to reopen those same nodes, colliding with librealsense's exclusive hold on them. | Scope the scan: `lerobot-find-cameras realsense`. |
 
 ---

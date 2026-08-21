@@ -5,7 +5,7 @@ description = "forte arm with LeRobot VLA"
 dependencies = [
     "torch",
     "numpy",
-    "lerobot[intelrealsense,hardware,viz,dataset] @ file:///home/daros/workspace2/lerobot",
+    "lerobot[intelrealsense,hardware,viz,dataset,training,smolvla] @ file:///home/daros/workspace2/lerobot",
 ]
 requires-python = ">=3.12"
 
