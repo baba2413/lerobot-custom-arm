@@ -10,8 +10,8 @@ from lerobot.robots import RobotConfig
 # The (slave = master + 10) id pairing is read directly from teensy-forte's bilateral firmware
 # (`teleop-bi` branch, teensy/teensy.ino: MST_IDS_CAN*/SLV_IDS_CAN* arrays) and holds regardless
 # of which physical CAN bus (CAN1/CAN2) a pair happens to be wired to on the Teensy -- that
-# grouping is irrelevant here, since the host never touches CAN directly at all, only the
-# Teensy's single serial port (see teensy_link.TeensyLink).
+# grouping is irrelevant here, since the host never touches CAN directly at all -- only the
+# Teensy's UDP telemetry (see teensy_link.TeensyLink).
 #
 # joint-name <-> id mapping cross-checked against teensy-dash/src/main.cpp's JOINT_NAMES /
 # JOINT_CAN_IDS / GEAR_RATIO arrays, which describe the same physical slave arm.
