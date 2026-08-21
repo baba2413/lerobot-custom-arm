@@ -11,13 +11,21 @@ Legend: **ACTION** = something you physically do, not a command. **RUN** = paste
 terminal, verbatim except placeholders in `<angle brackets>`. **CHECK** = stop and verify before
 continuing. **DECISION** = pick one of the listed options for your setup.
 
-Placeholders used throughout — set these once and reuse them:
-- `<TEENSY_PORT>` — the Teensy's serial device path (found in step 7). Used **only** for the
-  minicom console you keep open the whole session (Step 11) — LeRobot itself never touches serial
-  any more (see Phase 3/4/6: `forte_arm`/`forte_arm_master` read the Teensy over UDP telemetry
-  instead, `teleop-bi-c` firmware).
-- `<HF_USER>` — your Hugging Face username (set in step 10).
-- `<TASK_NAME>` — a short slug for the task you're teaching, e.g. `pick_cube` (chosen in step 22).
+Placeholders used throughout — these are **not** shell variables to `export` once. Type the actual
+value in by hand, every single time you see one of these in a command below:
+- `<TEENSY_PORT>` — the Teensy's serial device path, e.g. `/dev/ttyACM0` (found in Step 7). Used
+  **only** for the minicom console you keep open the whole session (Step 11) — LeRobot itself never
+  touches serial any more (see Phase 3/4/6: `forte_arm`/`forte_arm_master` read the Teensy over UDP
+  telemetry instead, `teleop-bi-c` firmware). This can renumber (`ttyACM0` → `ttyACM1`) if the
+  Teensy re-enumerates, so re-check with Step 7's `ls` rather than trusting a value from earlier in
+  the session.
+- `<HF_USER>` — your Hugging Face username, e.g. `jsmith` (found in Step 6).
+- `<TASK_NAME>` — a short slug for the task you're teaching, e.g. `pick_cube` (chosen in Step 22).
+
+(An earlier version of this runbook had you `export HF_USER=...`/`export TEENSY_PORT=...` once and
+reuse the shell variable everywhere below. That's gone — the auto-detection command
+(`hf auth whoami` piped through `awk`) silently produced the wrong value often enough that it
+wasn't worth the convenience. Typing the literal value is slower but never wrong.)
 
 ---
 
@@ -82,19 +90,21 @@ uv sync
 - **Push to Hub (recommended — easier to visualize/share):**
   ```bash
   uv run hf auth login
-  export HF_USER=$(NO_COLOR=1 uv run hf auth whoami | awk -F': *' 'NR==1 {print $2}')
+  uv run hf auth whoami
   ```
+  Note down the username `hf auth whoami` prints — that's your `<HF_USER>` for every command below
+  that has one. Type it in literally each time; don't rely on a shell variable (see the placeholder
+  note above).
 - **Fully local:** skip login; add `--dataset.push_to_hub=false` to the `lerobot-record` command
-  in step 23; set `export HF_USER=local` as a stand-in for naming.
+  in Step 21; use `local` (literally) wherever `<HF_USER>` appears below.
 
 **Step 7 — ACTION: Find the Teensy's serial port.**
 ```bash
 ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 ```
-(Unplug/replug the Teensy if you're unsure which one it is.) Set it for the rest of this session:
-```bash
-export TEENSY_PORT=/dev/ttyACM0   # replace with your actual path
-```
+(Unplug/replug the Teensy if you're unsure which one it is.) Note the path — that's your
+`<TEENSY_PORT>` for Step 11's minicom command. If it ever stops connecting later in the session,
+re-run this `ls` rather than assuming the path is still the same.
 
 ---
 
@@ -128,9 +138,9 @@ mismatch here becomes a permanent offset error for this session.
 
 **Step 11 — ACTION: Open the Teensy's serial console and leave it open.**
 ```bash
-minicom -D $TEENSY_PORT -b 115200
+minicom -D <TEENSY_PORT> -b 115200
 ```
-(`screen $TEENSY_PORT 115200` also works, but `minicom` is what the rest of this runbook assumes.)
+(`screen <TEENSY_PORT> 115200` also works, but `minicom` is what the rest of this runbook assumes.)
 Unlike earlier versions of this workflow, **this console now stays open for the entire session** —
 through Phase 4, all of Phase 6's recording, every episode's reset window, all the way to Step 34.
 LeRobot's `forte_arm`/`forte_arm_master` never touch the serial port at all (they read the
@@ -201,7 +211,7 @@ whole recording session, do not close it between episodes):
 uv run lerobot-record \
   --robot.type=forte_arm --robot.id=forte_v1 \
   --teleop.type=forte_arm_master --teleop.id=master1 \
-  --dataset.repo_id=${HF_USER}/forte_<TASK_NAME> \
+  --dataset.repo_id=<HF_USER>/forte_<TASK_NAME> \
   --dataset.single_task="<one sentence task description>" \
   --dataset.num_episodes=50 \
   --dataset.fps=15 \
@@ -220,7 +230,7 @@ episode, **←** discard and redo, **ESC** finish early.
 
 **Step 23 — CHECK: Where the data landed.**
 ```
-~/.cache/huggingface/lerobot/${HF_USER}/forte_<TASK_NAME>/
+~/.cache/huggingface/lerobot/<HF_USER>/forte_<TASK_NAME>/
 ├── data/       # per-episode action/state parquet files
 ├── videos/     # per-episode, per-camera mp4 files — already organized for you
 └── meta/       # info.json, episode index, task list, stats
@@ -268,22 +278,22 @@ leave folders behind, and only you know which ones are worth keeping.
 
 **List what you have (local):**
 ```bash
-ls -la ~/.cache/huggingface/lerobot/${HF_USER}/
-du -sh ~/.cache/huggingface/lerobot/${HF_USER}/*/     # sizes -- a near-empty one is usually a
+ls -la ~/.cache/huggingface/lerobot/<HF_USER>/
+du -sh ~/.cache/huggingface/lerobot/<HF_USER>/*/     # sizes -- a near-empty one is usually a
                                                         # crashed/aborted run with 0 real episodes
 ```
 
 **Check whether a given dataset actually has data in it**, without opening the visualizer:
 ```bash
-cat ~/.cache/huggingface/lerobot/${HF_USER}/forte_<TASK_NAME>/meta/info.json | grep total_episodes
+cat ~/.cache/huggingface/lerobot/<HF_USER>/forte_<TASK_NAME>/meta/info.json | grep total_episodes
 ```
 `"total_episodes": 0` means the run never got past the first episode (e.g. the `KeyError` we hit
 early on before Ethernet/telemetry was wired up correctly) — safe to delete without a second look.
 
 **Rename (local only):**
 ```bash
-mv ~/.cache/huggingface/lerobot/${HF_USER}/forte_<OLD_NAME> \
-   ~/.cache/huggingface/lerobot/${HF_USER}/forte_<NEW_NAME>
+mv ~/.cache/huggingface/lerobot/<HF_USER>/forte_<OLD_NAME> \
+   ~/.cache/huggingface/lerobot/<HF_USER>/forte_<NEW_NAME>
 ```
 Safe — nothing inside `meta/info.json` stores its own folder name or repo id, so a plain `mv` is
 enough for local use (e.g. pointing `--dataset.root=` at it, or Step 25's visualizer). It does
@@ -291,7 +301,7 @@ enough for local use (e.g. pointing `--dataset.root=` at it, or Step 25's visual
 
 **Delete (local):**
 ```bash
-rm -rf ~/.cache/huggingface/lerobot/${HF_USER}/forte_<TASK_NAME>
+rm -rf ~/.cache/huggingface/lerobot/<HF_USER>/forte_<TASK_NAME>
 ```
 Irreversible, no trash/undo — double-check the path before running. Useful right after Step 23 if
 an episode count or a quick `du -sh` tells you the run is junk, before it's worth the time to open
@@ -304,10 +314,10 @@ the visualizer at all.
 uv run hf repos list --type dataset
 
 # Rename/move a pushed dataset (e.g. fixing a typo, or moving to an org namespace)
-uv run hf repos move ${HF_USER}/forte_<OLD_NAME> ${HF_USER}/forte_<NEW_NAME> --type dataset
+uv run hf repos move <HF_USER>/forte_<OLD_NAME> <HF_USER>/forte_<NEW_NAME> --type dataset
 
 # Delete a pushed dataset -- irreversible, prompts for confirmation unless you pass -y
-uv run hf repos delete ${HF_USER}/forte_<TASK_NAME> --type dataset
+uv run hf repos delete <HF_USER>/forte_<TASK_NAME> --type dataset
 ```
 If you renamed both sides and want them to match again, do the local `mv` and the Hub `hf repos
 move` with the same `<NEW_NAME>` — nothing enforces they stay in sync, that's on you to keep
@@ -320,7 +330,7 @@ workflow).
 
 **Step 25 — ACTION:**
 If pushed to the Hub, open https://huggingface.co/spaces/lerobot/visualize_dataset and paste
-`${HF_USER}/forte_<TASK_NAME>`. Look through several episodes for anything beyond the expected
+`<HF_USER>/forte_<TASK_NAME>`. Look through several episodes for anything beyond the expected
 steppiness: missing/blurry camera frames, the object not at its marked start position, etc.
 
 **Note:** `lerobot-replay` does not work on `forte_arm` — see `SMOLVLA_GUIDE.md` §3/§1. The
@@ -335,14 +345,14 @@ instead (§1a, §12) — not yet verified as of this writing.
 **Step 26 — RUN:**
 ```bash
 uv run lerobot-train \
-  --dataset.repo_id=${HF_USER}/forte_<TASK_NAME> \
+  --dataset.repo_id=<HF_USER>/forte_<TASK_NAME> \
   --policy.type=smolvla \
   --policy.device=cuda \
   --output_dir=outputs/train/smolvla_forte_<TASK_NAME> \
   --job_name=smolvla_forte_<TASK_NAME> \
   --batch_size=4 \
   --wandb.enable=true \
-  --policy.repo_id=${HF_USER}/smolvla_forte_<TASK_NAME>
+  --policy.repo_id=<HF_USER>/smolvla_forte_<TASK_NAME>
 ```
 
 **Step 27 — ACTION: Watch the first few hundred steps.**
@@ -380,7 +390,7 @@ subnet, e.g. `192.168.1.10`).
 
 **Step 30 — ACTION: Pose the arm at your marked home position (Step 4b), then calibrate.**
 ```bash
-screen $TEENSY_PORT 115200
+screen <TEENSY_PORT> 115200
 ```
 Type `c`. Confirm each motor reports `zero set: 0.000 (<raw>) rad` and
 `Calibration complete. Per-joint limits now active relative to this pose.` If any motor reports
@@ -388,7 +398,7 @@ Type `c`. Confirm each motor reports `zero set: 0.000 (<raw>) rad` and
 
 **Step 31 — ACTION: Bench-test the UDP goal stream before trusting a policy with it.**
 ```bash
-uv run forte-arm-goal-limit-bench --port $TEENSY_PORT
+uv run forte-arm-goal-limit-bench --port <TEENSY_PORT>
 ```
 Edit `MOTOR_ID`/`DIRECTION` at the top of `goal_limit_bench.py` to test one axis at a time (motor
 ids 11, 13, 12, 14 = yaw, pitch, roll, elbow — **not** ascending CAN-wiring order). It ramps that
@@ -407,7 +417,7 @@ to resolve (see `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before a
 **Step 33 — RUN: rollout a trained policy.**
 ```bash
 uv run lerobot-rollout \
-  --robot.type=forte_arm_goal --robot.port=$TEENSY_PORT --robot.id=forte_v1 \
+  --robot.type=forte_arm_goal --robot.port=<TEENSY_PORT> --robot.id=forte_v1 \
   --policy.path=outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/last/pretrained_model \
   --fps=15 --display_data=true
 ```
