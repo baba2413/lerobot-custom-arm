@@ -32,12 +32,14 @@ class ForteArmMasterTeleop(Teleoperator):
     see ForteArm's docstring and `teensy_link.TeensyLink`'s docstring for why (UDP-only telemetry,
     no serial code path; the operator runs 'e'/'c'/'d' directly at the Teensy over minicom).
 
-    `action_features` values are raw motor-shaft degrees (whatever the Teensy's CAN feedback
-    reports), not gear-adjusted joint/link degrees -- JOINTS' external gear ratios are recorded as
-    hardware documentation only and are not applied anywhere in this pipeline. See ForteArm's
-    docstring for why, and for why `self._baseline_deg` is a fixed 0.0 rather than dynamically
-    captured -- on `teleop-bi-c`, the operator's `'c'` keypress at the Teensy makes the firmware
-    itself report zero-relative positions, so nothing needs subtracting host-side.
+    `action_features` values are raw motor-shaft **radians** (whatever the Teensy's CAN feedback
+    reports -- the firmware's own native unit, see `teensy_link.TeensyLink`'s docstring for why
+    there's no degrees anywhere in this pipeline), not gear-adjusted joint/link angles -- JOINTS'
+    external gear ratios are recorded as hardware documentation only and are not applied anywhere
+    in this pipeline. See ForteArm's docstring for why, and for why `self._baseline_rad` is a fixed
+    0.0 rather than dynamically captured -- on `teleop-bi-c`, the operator's `'c'` keypress at the
+    Teensy makes the firmware itself report zero-relative positions, so nothing needs subtracting
+    host-side.
     """
 
     config_class = ForteArmMasterTeleopConfig
@@ -49,7 +51,7 @@ class ForteArmMasterTeleop(Teleoperator):
         self.link = TeensyLink.get(config.udp_port)
         self._master_id = {joint: master_id for joint, (_slave_id, master_id, _ratio) in JOINTS.items()}
         self._connected = False
-        self._baseline_deg: dict[int, float] = {}
+        self._baseline_rad: dict[int, float] = {}
 
     @property
     def action_features(self) -> dict:
@@ -67,7 +69,7 @@ class ForteArmMasterTeleop(Teleoperator):
     def connect(self, calibrate: bool = True) -> None:
         logger.info(f"Connecting {self} to Teensy UDP telemetry on port {self.config.udp_port}...")
         self.link.connect()
-        self._baseline_deg = dict.fromkeys(self._master_id.values(), 0.0)
+        self._baseline_rad = dict.fromkeys(self._master_id.values(), 0.0)
         self._connected = True
         logger.info(f"{self} connected.")
 
@@ -83,7 +85,7 @@ class ForteArmMasterTeleop(Teleoperator):
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
-        positions = self.link.get_positions_deg()
+        positions = self.link.get_positions_rad()
         action: RobotAction = {}
         for joint, master_id in self._master_id.items():
             if master_id not in positions:
@@ -93,7 +95,7 @@ class ForteArmMasterTeleop(Teleoperator):
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
             # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
-            action[f"{joint}.pos"] = positions[master_id] - self._baseline_deg[master_id]
+            action[f"{joint}.pos"] = positions[master_id] - self._baseline_rad[master_id]
         return action
 
     def send_feedback(self, feedback: dict) -> None:

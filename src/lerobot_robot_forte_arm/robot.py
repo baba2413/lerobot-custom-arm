@@ -32,16 +32,18 @@ class ForteArm(Robot):
     human on the master) is NOT possible with the firmware as it stands today -- that needs a new
     goal-position serial command added to teensy.ino first. See SMOLVLA_GUIDE.md.
 
-    `observation_features`'/`action_features` `.pos` values are raw motor-shaft degrees (whatever
-    the Teensy's CAN feedback reports), not gear-adjusted joint/link degrees. JOINTS' external gear
-    ratios describe the real hardware but are deliberately not applied here: this pipeline only
-    ever needs to record what a motor did and later reproduce it on the same motor, and a trained
-    policy doesn't care whether that number is "physically real" degrees, only that recording and
-    eval agree -- so there's no reason to add a unit conversion whose only real effect would be
-    another way for a train/eval mismatch to sneak in (e.g. via SMOLVLA_GUIDE.md's still-unverified
-    assumption that master and slave gear ratios even match).
+    `observation_features`'/`action_features` `.pos` values are raw motor-shaft **radians**
+    (whatever the Teensy's CAN feedback reports -- the firmware's own native unit; see
+    `teensy_link.TeensyLink`'s docstring for why there's no degrees anywhere in this pipeline), not
+    gear-adjusted joint/link angles. JOINTS' external gear ratios describe the real hardware but
+    are deliberately not applied here: this pipeline only ever needs to record what a motor did and
+    later reproduce it on the same motor, and a trained policy doesn't care whether that number is
+    "physically real," only that recording and eval agree -- so there's no reason to add a unit
+    conversion whose only real effect would be another way for a train/eval mismatch to sneak in
+    (e.g. via SMOLVLA_GUIDE.md's still-unverified assumption that master and slave gear ratios even
+    match).
 
-    `self._baseline_deg` is fixed at a plain **0.0** for every motor -- not dynamically captured
+    `self._baseline_rad` is fixed at a plain **0.0** for every motor -- not dynamically captured
     (that's what an earlier version of this class did via `wait_for_positions()`; see
     `teensy_link.py`'s history for why that got reverted here). Recorded `.pos` is therefore
     whatever the Teensy's status line reports, unmodified. On `teleop-bi-c` that's already
@@ -63,7 +65,7 @@ class ForteArm(Robot):
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
-        self._baseline_deg: dict[int, float] = {}
+        self._baseline_rad: dict[int, float] = {}
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -93,7 +95,7 @@ class ForteArm(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
-        self._baseline_deg = dict.fromkeys(self._slave_id.values(), 0.0)
+        self._baseline_rad = dict.fromkeys(self._slave_id.values(), 0.0)
         self._connected = True
         logger.info(f"{self} connected (read-only -- see class docstring).")
 
@@ -121,7 +123,7 @@ class ForteArm(Robot):
     def get_observation(self) -> RobotObservation:
         start = time.perf_counter()
 
-        positions = self.link.get_positions_deg()
+        positions = self.link.get_positions_rad()
         obs_dict: dict[str, Any] = {}
         for joint, slave_id in self._slave_id.items():
             if slave_id not in positions:
@@ -131,7 +133,7 @@ class ForteArm(Robot):
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
             # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
-            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_deg[slave_id]
+            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_rad[slave_id]
 
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()

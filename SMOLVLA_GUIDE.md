@@ -125,7 +125,7 @@ the only thing that keeps the arm moving/enabled is a steady stream of goal comm
 
 Host side: `teensy_link.TeensyGoalLink` (a separate class from `TeensyLink`, not a variant of it —
 different wire protocol, and since there's no master arm competing for the port, no ref-counted
-sharing needed) exposes `send_goal()`, `enable()`, `disable()`, `get_positions_deg()`. `robot_goal.
+sharing needed) exposes `send_goal()`, `enable()`, `disable()`, `get_positions_rad()`. `robot_goal.
 ForteArmGoal` (`--robot.type=forte_arm_goal`) wraps that as a full `Robot`, and unlike `ForteArm`,
 its `send_action()` actually moves the arm.
 
@@ -156,19 +156,21 @@ The `(slave = master + 10)` id pairing comes straight from `teleop-bi-p-t`'s `MS
 
 **Gear ratios are recorded here as hardware documentation only — nothing in this package applies
 them.** They used to (an earlier version of `ForteArm.get_observation()` /
-`ForteArmMasterTeleop.get_action()` divided by gear ratio to report "link-space" degrees), but
+`ForteArmMasterTeleop.get_action()` divided by gear ratio to report "link-space" angles), but
 that was removed: the record→train→replay/eval loop never needed physically-real units — a policy
-trained end-to-end doesn't care whether a number is "real" degrees, only that recording and eval
-agree — and the conversion was actively risky, since it rested on the unverified assumption that
-master and slave gear ratios even match (§14 used to list this as an open item; it's now moot,
-since nothing depends on it). The whole pipeline works in **raw motor-shaft degrees** now — what
-the Teensy's CAN feedback reports directly, with no conversion in either direction. If you ever
-need real physical joint angles again (e.g. for kinematics, or human-authored safety limits — see
-§14), that's a good place to reach for this table; just don't thread it back through the
-recording/eval path itself.
+trained end-to-end doesn't care whether a number is "real," only that recording and eval agree —
+and the conversion was actively risky, since it rested on the unverified assumption that master
+and slave gear ratios even match (§14 used to list this as an open item; it's now moot, since
+nothing depends on it). The whole pipeline works in **raw motor-shaft radians** now — the
+firmware's own native unit, what the Teensy's CAN feedback reports directly, with no conversion in
+either direction (an earlier revision converted to degrees host-side and back; that round-trip was
+removed for the identical reason gear ratios were — another place for a unit mismatch to hide, for
+no benefit). If you ever need real physical joint angles again (e.g. for kinematics, or
+human-authored safety limits — see §14), that's a good place to reach for this table; just don't
+thread it back through the recording/eval path itself.
 
 `ForteArm`, `ForteArmMasterTeleop`, and `ForteArmGoal` all expose exactly these 4 joints as
-`{joint}.pos` in raw motor-shaft degrees. Camera: one Intel RealSense (`cam_1`, serial
+`{joint}.pos` in raw motor-shaft radians. Camera: one Intel RealSense (`cam_1`, serial
 `825312072171`, 640×480 @ 15 fps, RGB), attached to the slave side (it watches the task).
 
 **Values are also delta from that session's connect()-time baseline, not the motor's raw absolute
@@ -183,7 +185,7 @@ before calling `TeensyGoalLink.send_goal()` (which still speaks absolute raw rad
 unchanged — delta-vs-absolute is a host-side representation choice, not a wire-protocol one, so
 neither firmware branch needed to change for this). This is robust to the encoder's absolute
 reference drifting, by construction, whether or not it actually turns out to on this hardware — it
-only requires the motor's rotation-to-degrees *scale* to be stable, not its zero point.
+only requires the motor's rotation-to-radians *scale* to be stable, not its zero point.
 
 **This only works if the arm is physically posed the same way at the start of every session**
 (recording *and* eval) before `connect()` — delta cancels an absolute-reference shift between
@@ -264,8 +266,8 @@ uv run forte-arm-smoke-test
 ```
 
 Listens on the default UDP telemetry port (5006), waits ~3s to catch at least one status-print
-cycle, and prints whatever master/slave positions it received (raw motor-shaft degrees — see §2 on
-why this pipeline doesn't convert to link-space). Confirm all 4 joints show up for both master and
+cycle, and prints whatever master/slave positions it received (raw motor-shaft radians — see §2 on
+why this pipeline doesn't convert to degrees or link-space). Confirm all 4 joints show up for both master and
 slave — if some are missing, check the Teensy is powered, running `teleop-bi-c`, and the Ethernet
 cable is connected. There's no `--port` to get wrong any more; pass `--udp-port` only if you
 changed `TELEMETRY_UDP_PORT` in teensy.ino.
@@ -388,7 +390,7 @@ Two things to keep in mind that don't apply to the bilateral firmware:
 - The `goal` firmware's 150 ms watchdog (§1a) means `send_action()` must be called that often to
   keep the arm moving — a policy inference stall (slow model, host under load) shows up as the arm
   stopping mid-motion, not as a queued/delayed command.
-- `forte_arm_goal`'s `.pos` units match `forte_arm`'s exactly (raw motor-shaft degrees, §2) by
+- `forte_arm_goal`'s `.pos` units match `forte_arm`'s exactly (raw motor-shaft radians, §2) by
   design — a policy trained on `forte_arm` recordings should need no unit translation to run here.
 
 ---

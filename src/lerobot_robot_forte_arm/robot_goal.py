@@ -31,11 +31,12 @@ class ForteArmGoal(Robot):
     control loop, but a `lerobot-record`/`lerobot-eval` pause (e.g. a breakpoint) will stop the
     arm mid-motion rather than leave it holding a stale command.
 
-    `observation_features`/`action_features` `.pos` values are raw motor-shaft degrees, matching
-    `ForteArm`/`ForteArmMasterTeleop` exactly (no gear-ratio conversion anywhere in this pipeline)
-    -- required so a policy trained on `ForteArm`'s recordings sees the same units here at eval
-    time. See ForteArm's docstring for why gear ratios aren't applied at all, and for why values
-    are also delta-from-this-session's-baseline rather than the motor's raw absolute reading
+    `observation_features`/`action_features` `.pos` values are raw motor-shaft **radians**,
+    matching `ForteArm`/`ForteArmMasterTeleop` exactly (no gear-ratio conversion, and no degrees
+    anywhere in this pipeline -- see `teensy_link.TeensyLink`'s docstring) -- required so a policy
+    trained on `ForteArm`'s recordings sees the same units here at eval time. See ForteArm's
+    docstring for why gear ratios aren't applied at all, and for why values are also
+    delta-from-this-session's-baseline rather than the motor's raw absolute reading
     (`get_observation()` subtracts it; `send_action()` adds it back before calling
     `TeensyGoalLink.send_goal()`, which still speaks absolute raw radians over UDP unchanged --
     delta-vs-absolute is a host-side representation choice, not a wire-protocol one). This only
@@ -54,7 +55,7 @@ class ForteArmGoal(Robot):
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
-        self._baseline_deg: dict[int, float] = {}
+        self._baseline_rad: dict[int, float] = {}
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -84,9 +85,9 @@ class ForteArmGoal(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
-        self._baseline_deg = wait_for_positions(self.link, self._slave_id.values())
+        self._baseline_rad = wait_for_positions(self.link, self._slave_id.values())
         self._connected = True
-        logger.info(f"{self} connected. Baseline: {self._baseline_deg}")
+        logger.info(f"{self} connected. Baseline: {self._baseline_rad}")
 
     @check_if_not_connected
     def disconnect(self) -> None:
@@ -134,7 +135,7 @@ class ForteArmGoal(Robot):
     def get_observation(self) -> RobotObservation:
         start = time.perf_counter()
 
-        positions = self.link.get_positions_deg()
+        positions = self.link.get_positions_rad()
         obs_dict: dict[str, Any] = {}
         for joint, slave_id in self._slave_id.items():
             if slave_id not in positions:
@@ -144,7 +145,7 @@ class ForteArmGoal(Robot):
             if age is not None and age > self.config.stale_after_s:
                 logger.warning(f"{self}: {joint} position is {age:.1f}s old (Teensy not reporting?).")
             # delta from this session's connect()-time baseline, not raw absolute -- see class docstring
-            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_deg[slave_id]
+            obs_dict[f"{joint}.pos"] = positions[slave_id] - self._baseline_rad[slave_id]
 
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()
@@ -156,12 +157,12 @@ class ForteArmGoal(Robot):
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
         # action[f"{joint}.pos"] is delta-from-baseline (no gear conversion either, see class
-        # docstring) -- add this session's baseline back to get the absolute raw motor degrees
+        # docstring) -- add this session's baseline back to get the absolute raw motor radians
         # TeensyGoalLink.send_goal() actually sends over UDP.
-        positions_deg = {
-            self._slave_id[joint]: self._baseline_deg[self._slave_id[joint]] + action[f"{joint}.pos"]
+        positions_rad = {
+            self._slave_id[joint]: self._baseline_rad[self._slave_id[joint]] + action[f"{joint}.pos"]
             for joint in JOINTS
             if f"{joint}.pos" in action
         }
-        self.link.send_goal(positions_deg)
+        self.link.send_goal(positions_rad)
         return {key: val for key, val in action.items() if key.endswith(".pos")}

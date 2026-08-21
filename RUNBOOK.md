@@ -242,10 +242,10 @@ about.
   always calls it), but it's a no-op that just echoes the action back unchanged — `teleop-bi-p-t`
   has no way to actually command the slave, so it can't modify what gets recorded.
 
-**Note on units:** recorded `.pos` values are motor-shaft degrees (whatever the Teensy's own CAN
-feedback reports) — this pipeline does not convert to link/joint-space degrees anywhere. See
-`SMOLVLA_GUIDE.md` §2 if you're comparing these numbers against the physical arm's real range of
-motion.
+**Note on units:** recorded `.pos` values are motor-shaft **radians** (the firmware's own native
+unit, whatever the Teensy's own CAN feedback reports) — this pipeline does not convert to degrees
+or to link/joint-space angles anywhere. See `SMOLVLA_GUIDE.md` §2 if you're comparing these numbers
+against the physical arm's real range of motion.
 
 They're also **delta from two independent, session-start baselines**, not the motor's raw absolute
 reading — `observation.state[i] = slave_raw[i] - slave_baseline[i]` (baseline captured once, at

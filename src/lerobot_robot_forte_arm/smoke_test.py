@@ -33,10 +33,11 @@ def main() -> None:
     print(f"Waiting up to {args.wait_s:.1f}s for status lines...")
     time.sleep(args.wait_s)
 
-    # Raw motor-shaft degrees, matching what ForteArm/ForteArmMasterTeleop actually record --
-    # see ForteArm's docstring for why this pipeline doesn't apply JOINTS' gear ratios.
-    positions = link.get_positions_deg()
-    print(f"\n{'joint':<16} {'slave id':>9} {'master id':>10} {'slave deg':>10} {'master deg':>11}")
+    # Raw motor-shaft radians, matching what ForteArm/ForteArmMasterTeleop actually record --
+    # see teensy_link.TeensyLink's docstring for why this pipeline uses radians throughout (no
+    # degrees, no gear ratios).
+    positions = link.get_positions_rad()
+    print(f"\n{'joint':<16} {'slave id':>9} {'master id':>10} {'slave rad':>10} {'master rad':>11}")
     missing = []
     for joint, (slave_id, master_id, _ratio) in JOINTS.items():
         if slave_id not in positions or master_id not in positions:
@@ -44,7 +45,7 @@ def main() -> None:
             continue
         print(
             f"{joint:<16} {slave_id:>9} {master_id:>10} "
-            f"{positions[slave_id]:>10.2f} {positions[master_id]:>11.2f}"
+            f"{positions[slave_id]:>10.3f} {positions[master_id]:>11.3f}"
         )
 
     if missing:

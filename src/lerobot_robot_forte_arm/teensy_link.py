@@ -1,5 +1,4 @@
 import logging
-import math
 import re
 import socket
 import threading
@@ -12,16 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 class _PositionSource(Protocol):
-    def get_positions_deg(self) -> dict[int, float]: ...
+    def get_positions_rad(self) -> dict[int, float]: ...
 
 
 def wait_for_positions(
     link: _PositionSource, motor_ids: Iterable[int], timeout_s: float = 3.0
 ) -> dict[int, float]:
     """
-    Block until `link.get_positions_deg()` has a reading for every id in `motor_ids`, then return
+    Block until `link.get_positions_rad()` has a reading for every id in `motor_ids`, then return
     that snapshot. Works with either `TeensyLink` or `TeensyGoalLink` (both share the
-    `get_positions_deg()` shape) via duck typing rather than a shared base class.
+    `get_positions_rad()` shape) via duck typing rather than a shared base class.
 
     Used by `ForteArmGoal` to establish a per-session position baseline at connect time -- see its
     docstring for why `.pos` is reported delta-from-this-baseline rather than the motor's raw
@@ -39,7 +38,7 @@ def wait_for_positions(
     deadline = time.monotonic() + timeout_s
     positions: dict[int, float] = {}
     while time.monotonic() < deadline:
-        positions = link.get_positions_deg()
+        positions = link.get_positions_rad()
         if all(m in positions for m in motor_ids):
             return {m: positions[m] for m in motor_ids}
         time.sleep(0.05)
@@ -96,9 +95,14 @@ class TeensyLink:
 
     A background thread continuously drains the Teensy's periodic
     `[CAN1] Master <id> Pos: <rad> | Slave <id> Pos: <rad> | ...` UDP telemetry packets and caches
-    the latest position per motor CAN id, in degrees. `get_positions_deg()` is non-blocking and
-    always returns whatever was last parsed (i.e. it's a "latest known", not a fresh synchronous
-    read).
+    the latest position per motor CAN id, in **radians** -- the firmware's own native unit
+    (`P_MIN`/`P_MAX`/`RAW_LIMIT_MIN`/`RAW_LIMIT_MAX` in teensy.ino, the status line itself, and the
+    `goal` branch's UDP wire protocol are all radians too). No degrees anywhere in this pipeline:
+    an earlier revision of this class converted rad->deg here and `TeensyGoalLink.send_goal()`
+    converted deg->rad right back before sending -- a pointless round-trip that only added a place
+    for a unit mistake to hide, removed for the same reason gear-ratio conversion was removed (see
+    ForteArm's docstring). `get_positions_rad()` is non-blocking and always returns whatever was
+    last parsed (i.e. it's a "latest known", not a fresh synchronous read).
 
     Known limitation: the firmware only sends telemetry roughly once a second (`LOG_PERIOD` in
     teensy.ino) -- same limitation as the old serial link, unchanged by this UDP switch. That's far
@@ -115,7 +119,7 @@ class TeensyLink:
         self._udp_sock: socket.socket | None = None
         self._ref_count = 0
         self._lock = threading.Lock()
-        self._positions_deg: dict[int, float] = {}
+        self._positions_rad: dict[int, float] = {}
         self._last_update: dict[int, float] = {}
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
@@ -164,11 +168,11 @@ class TeensyLink:
                 self._udp_sock = None
             logger.info("TeensyLink UDP telemetry listener stopped.")
 
-    def get_positions_deg(self) -> dict[int, float]:
-        """Latest known position per CAN motor id, in degrees. Non-blocking; may be stale -- see
-        age_s()."""
+    def get_positions_rad(self) -> dict[int, float]:
+        """Latest known position per CAN motor id, in radians (firmware's native unit -- see class
+        docstring). Non-blocking; may be stale -- see age_s()."""
         with self._lock:
-            return dict(self._positions_deg)
+            return dict(self._positions_rad)
 
     def age_s(self, motor_id: int) -> float | None:
         """Seconds since the last update for this motor id, or None if never received."""
@@ -194,11 +198,11 @@ class TeensyLink:
             now = time.monotonic()
             master_id = int(match["master_id"])
             slave_id = int(match["slave_id"])
-            master_deg = math.degrees(float(match["master_pos"]))
-            slave_deg = math.degrees(float(match["slave_pos"]))
+            master_rad = float(match["master_pos"])
+            slave_rad = float(match["slave_pos"])
             with self._lock:
-                self._positions_deg[master_id] = master_deg
-                self._positions_deg[slave_id] = slave_deg
+                self._positions_rad[master_id] = master_rad
+                self._positions_rad[slave_id] = slave_rad
                 self._last_update[master_id] = now
                 self._last_update[slave_id] = now
 
@@ -241,15 +245,16 @@ class TeensyGoalLink:
     branch, which solved the same "one channel, two jobs" problem we hit when goal-streaming
     briefly lived on serial -- see git history on the `goal` branch for what that cost):
       - USB serial: `calibrate()` ('c') / `disable()` ('d'), single-char, human-supervised. Also
-        the source of `get_positions_deg()`'s telemetry (the firmware's periodic status line).
+        the source of `get_positions_rad()`'s telemetry (the firmware's periodic status line).
       - Ethernet UDP: `send_goal()`, the continuous goal-position stream. Fire-and-forget
         datagrams to (UDP_HOST, UDP_PORT) -- no connection/handshake/delivery guarantee, matching
         the firmware's stateless, watchdog-protected design (GOAL_TIMEOUT_MS = 500ms in
         teensy.ino): a dropped packet just means the next one takes over.
 
-    Like `TeensyLink`, this class works entirely in raw motor-shaft units (radians for commands,
-    degrees for `get_positions_deg()`, matching that class's convention) and knows nothing about
-    gear ratios or joint names -- callers convert via `config.JOINTS` before calling `send_goal()`.
+    Like `TeensyLink`, this class works entirely in raw motor-shaft **radians** throughout
+    (commands and `get_positions_rad()` alike -- the firmware's own native unit, no degrees
+    anywhere) and knows nothing about gear ratios or joint names -- callers convert via
+    `config.JOINTS` before calling `send_goal()`.
     """
 
     UDP_HOST = "192.168.1.15"  # matches teensy.ino's static IP (staticIP, direct-cable setup)
@@ -261,7 +266,7 @@ class TeensyGoalLink:
         self._serial: serial.Serial | None = None
         self._udp_sock: socket.socket | None = None
         self._lock = threading.Lock()
-        self._positions_deg: dict[int, float] = {}
+        self._positions_rad: dict[int, float] = {}
         self._last_update: dict[int, float] = {}
         self._reader_thread: threading.Thread | None = None
         self._stop_reader = threading.Event()
@@ -312,9 +317,9 @@ class TeensyGoalLink:
         """Enter GOAL mode holding the arm's current position -- the UDP-era equivalent of the old
         bare serial 'g'. There's no "hold current position" concept in the firmware's UDP protocol
         (every packet must carry 4 real values), so this reads the last known position from
-        get_positions_deg() and sends that straight back as the first goal. Requires at least one
+        get_positions_rad() and sends that straight back as the first goal. Requires at least one
         status line to have arrived first (i.e. call this after connect(), not immediately at it)."""
-        positions = self.get_positions_deg()
+        positions = self.get_positions_rad()
         missing = [m for m in GOAL_MOTOR_ORDER if m not in positions]
         if missing:
             raise RuntimeError(
@@ -323,11 +328,11 @@ class TeensyGoalLink:
             )
         self.send_goal(positions)
 
-    def send_goal(self, positions_deg: dict[int, float]) -> None:
+    def send_goal(self, positions_rad: dict[int, float]) -> None:
         """
-        Send one goal-position UDP packet. `positions_deg` must have exactly the four keys in
-        GOAL_MOTOR_ORDER (raw motor-shaft degrees, not gear-adjusted -- same convention as
-        get_positions_deg()). Also enters GOAL mode if not already in it (see teensy.ino's
+        Send one goal-position UDP packet. `positions_rad` must have exactly the four keys in
+        GOAL_MOTOR_ORDER (raw motor-shaft radians, not gear-adjusted -- same convention as
+        get_positions_rad()). Also enters GOAL mode if not already in it (see teensy.ino's
         handleGoalPacket()), so calling this alone is enough to both arm and start moving the arm.
 
         Call this at your control-loop rate (e.g. once per policy inference step) -- the firmware
@@ -336,8 +341,8 @@ class TeensyGoalLink:
         """
         if self._udp_sock is None:
             raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
-        values_rad = [math.radians(positions_deg[motor_id]) for motor_id in GOAL_MOTOR_ORDER]
-        payload = ",".join(f"{v:.4f}" for v in values_rad)
+        values = [positions_rad[motor_id] for motor_id in GOAL_MOTOR_ORDER]
+        payload = ",".join(f"{v:.4f}" for v in values)
         self._udp_sock.sendto(payload.encode("ascii"), (self.UDP_HOST, self.UDP_PORT))
 
     def _write_serial(self, data: bytes) -> None:
@@ -345,12 +350,12 @@ class TeensyGoalLink:
             raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
         self._serial.write(data)
 
-    def get_positions_deg(self) -> dict[int, float]:
-        """Latest known position per CAN motor id, in degrees. Non-blocking; may be stale -- see
-        age_s(). Sourced from the firmware's periodic serial status line, independent of the UDP
-        goal stream."""
+    def get_positions_rad(self) -> dict[int, float]:
+        """Latest known position per CAN motor id, in radians (firmware's native unit). Non-blocking;
+        may be stale -- see age_s(). Sourced from the firmware's periodic serial status line,
+        independent of the UDP goal stream."""
         with self._lock:
-            return dict(self._positions_deg)
+            return dict(self._positions_rad)
 
     def age_s(self, motor_id: int) -> float | None:
         """Seconds since the last update for this motor id, or None if never received."""
@@ -373,7 +378,7 @@ class TeensyGoalLink:
                 continue
             now = time.monotonic()
             motor_id = int(match["motor_id"])
-            pos_deg = math.degrees(float(match["pos"]))
+            pos_rad = float(match["pos"])
             with self._lock:
-                self._positions_deg[motor_id] = pos_deg
+                self._positions_rad[motor_id] = pos_rad
                 self._last_update[motor_id] = now
