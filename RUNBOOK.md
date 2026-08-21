@@ -68,6 +68,13 @@ variant before switching on). Plug the Teensy into the host PC via USB. Do not s
 Note: unlike an earlier draft of this runbook, **no separate CAN adapter is needed on the host** —
 the Teensy's own USB-serial connection is the only link required (see `SMOLVLA_GUIDE.md` §1).
 
+**Prefer a different USB port (ideally a different host controller) for the Teensy than for the
+RealSense.** The camera draws a real power spike when it starts streaming; if it shares a
+controller/hub with the Teensy, that draw can brown-out the board and reset it mid-session —
+symptom looks like the Teensy's boot banner reprinting in minicom right when `lerobot-record`
+connects the camera. Check with `lsusb -t` beforehand if you're not sure which physical ports map
+to which controller.
+
 **Which firmware for which phase:** Phases 0–8 (below) need `teensy-forte`'s **`teleop-bi-p-t`**
 branch flashed (bilateral teleop, `'e'`/`'d'`). Phase 9 (evaluation) needs a **different**,
 standalone firmware — the **`goal`** branch (single arm, `'c'`/`'d'` over serial + goal positions
