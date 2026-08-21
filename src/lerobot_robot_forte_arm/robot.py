@@ -9,7 +9,7 @@ from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from .config import JOINTS, ForteArmConfig
-from .teensy_link import TeensyLink, wait_for_positions
+from .teensy_link import TeensyLink
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +38,16 @@ class ForteArm(Robot):
     another way for a train/eval mismatch to sneak in (e.g. via SMOLVLA_GUIDE.md's still-unverified
     assumption that master and slave gear ratios even match).
 
-    Values are also **delta from this session's connect()-time baseline**, not the motor's raw
-    absolute reading -- the Robstride protocol's own `UNCALIBRATED` fault bit implies the absolute
-    reference isn't guaranteed stable across power cycles, so a dataset recorded across multiple
-    sessions in raw absolute terms could have the same `.pos` number mean a different physical
-    angle in different episodes. Delta-from-baseline is robust to that by construction: it only
-    requires the motor's rotation-to-radians *scale* to be stable (safe to assume), not its
-    absolute zero. See `wait_for_positions()` in teensy_link.py. This only works if the arm is
-    physically posed the same way at the start of every session before connect() -- delta cancels
-    an absolute-reference shift, not a genuinely different starting pose.
+    `self._baseline_deg` is fixed at a plain **0.0** for every motor -- not dynamically captured
+    (that's what an earlier version of this class did via `wait_for_positions()`; see
+    `teensy_link.py`'s history for why that got reverted here). Recorded `.pos` is therefore
+    whatever the Teensy's status line reports, unmodified. On `teleop-bi-c` that's already
+    zero-relative -- send `'c'` (see `calibrate_zero()`) once, and the firmware itself subtracts
+    each motor's `'c'`-time position before printing (logging-only on that branch, see its
+    `teensy.ino` header -- does not touch the bilateral offset or control loop at all). On
+    `teleop-bi` / `teleop-bi-p-t` (no `'c'` support), `'c'` is just an ignored byte and you'll get
+    raw absolute values with no warning, since the status line's format is identical either way
+    and there's no way to tell from here which firmware is actually flashed.
     """
 
     config_class = ForteArmConfig
@@ -89,9 +90,9 @@ class ForteArm(Robot):
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
-        self._baseline_deg = wait_for_positions(self.link, self._slave_id.values())
+        self._baseline_deg = dict.fromkeys(self._slave_id.values(), 0.0)
         self._connected = True
-        logger.info(f"{self} connected (read-only -- see class docstring). Baseline: {self._baseline_deg}")
+        logger.info(f"{self} connected (read-only -- see class docstring).")
 
     @check_if_not_connected
     def disconnect(self) -> None:
@@ -121,6 +122,13 @@ class ForteArm(Robot):
     def disable(self) -> None:
         """Send 'd' to the Teensy: disable both arms."""
         self.link.disable()
+
+    def calibrate_zero(self) -> None:
+        """Send 'c' (`teleop-bi-c` branch only): logging-only zero -- the status line reports
+        relative-to-this-pose from then on, which is what makes recorded `.pos` values delta
+        instead of raw absolute (see class docstring). Does not enable, disable, or move anything.
+        A no-op byte if `teleop-bi`/`teleop-bi-p-t` is flashed instead."""
+        self.link.calibrate()
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:

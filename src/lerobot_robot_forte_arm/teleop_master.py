@@ -6,7 +6,7 @@ from lerobot.types import RobotAction
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from .config import JOINTS
-from .teensy_link import TeensyLink, wait_for_positions
+from .teensy_link import TeensyLink
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,9 @@ class ForteArmMasterTeleop(Teleoperator):
     `action_features` values are raw motor-shaft degrees (whatever the Teensy's CAN feedback
     reports), not gear-adjusted joint/link degrees -- JOINTS' external gear ratios are recorded as
     hardware documentation only and are not applied anywhere in this pipeline. See ForteArm's
-    docstring for why, and for why values are also delta-from-this-session's-baseline rather than
-    the motor's raw absolute reading.
+    docstring for why, and for why `self._baseline_deg` is a fixed 0.0 rather than dynamically
+    captured -- on `teleop-bi-c`, `'c'` (`calibrate_zero()`) makes the firmware itself report
+    zero-relative positions, so nothing needs subtracting host-side.
     """
 
     config_class = ForteArmMasterTeleopConfig
@@ -66,9 +67,9 @@ class ForteArmMasterTeleop(Teleoperator):
     def connect(self, calibrate: bool = True) -> None:
         logger.info(f"Connecting {self} to Teensy on {self.config.port} (read-only)...")
         self.link.connect()
-        self._baseline_deg = wait_for_positions(self.link, self._master_id.values())
+        self._baseline_deg = dict.fromkeys(self._master_id.values(), 0.0)
         self._connected = True
-        logger.info(f"{self} connected. Baseline: {self._baseline_deg}")
+        logger.info(f"{self} connected.")
 
     @property
     def is_calibrated(self) -> bool:
@@ -79,6 +80,12 @@ class ForteArmMasterTeleop(Teleoperator):
 
     def configure(self) -> None:
         pass
+
+    def calibrate_zero(self) -> None:
+        """Send 'c' (`teleop-bi-c` branch only): logging-only zero -- see ForteArm's docstring/
+        `calibrate_zero()`. Shares `TeensyLink` with `ForteArm`, so calling it from either object
+        has the same effect; only needs calling once per session, not from both."""
+        self.link.calibrate()
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:

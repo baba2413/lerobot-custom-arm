@@ -23,12 +23,14 @@ def wait_for_positions(
     that snapshot. Works with either `TeensyLink` or `TeensyGoalLink` (both share the
     `get_positions_deg()` shape) via duck typing rather than a shared base class.
 
-    Used to establish a per-session position baseline at connect time -- see `ForteArm`/
-    `ForteArmMasterTeleop`/`ForteArmGoal`'s docstrings for why `.pos` is reported delta-from-this-
-    baseline rather than the motor's raw absolute reading: the Robstride protocol's own
-    `UNCALIBRATED` fault bit implies the absolute reference isn't guaranteed stable across power
-    cycles, so recording/commanding delta-from-session-start is robust to that drift by
-    construction, whether or not it actually turns out to matter on this hardware.
+    Used by `ForteArmGoal` to establish a per-session position baseline at connect time -- see its
+    docstring for why `.pos` is reported delta-from-this-baseline rather than the motor's raw
+    absolute reading: the Robstride protocol's own `UNCALIBRATED` fault bit implies the absolute
+    reference isn't guaranteed stable across power cycles, so commanding delta-from-session-start
+    is robust to that drift by construction, whether or not it actually turns out to matter on
+    this hardware. `ForteArm`/`ForteArmMasterTeleop` (bilateral) don't call this anymore -- see
+    their docstrings: on `teleop-bi-c` the equivalent zeroing happens firmware-side via `'c'`
+    instead, so their own baseline is now fixed at a plain 0.0 rather than dynamically captured.
 
     Raises TimeoutError if not all ids report within `timeout_s` -- fails loudly rather than
     silently baselining against a partial/wrong snapshot.
@@ -62,7 +64,12 @@ _STATUS_RE = re.compile(
 class TeensyLink:
     """
     Shared serial connection to the Teensy running teensy-forte's bilateral firmware
-    (`teleop-bi` / `teleop-bi-p-t` branches, `teensy/teensy.ino`). One physical Teensy exposes
+    (`teleop-bi` / `teleop-bi-p-t` / `teleop-bi-c` branches, `teensy/teensy.ino`). `teleop-bi-c`
+    is `teleop-bi-p-t` plus a purely-additive `'c'` command (see `calibrate()`) -- its status line
+    keeps the exact same single-number format, so `_STATUS_RE` matches all three branches
+    unchanged; `calibrate()` is simply a no-op byte on branches that don't understand `'c'`.
+
+    One physical Teensy exposes
     exactly one USB-serial port, but LeRobot instantiates the slave robot (`ForteArm`) and the
     master teleoperator (`ForteArmMasterTeleop`) independently — both need to read from that same
     port. This class is a per-port singleton with reference-counted connect/disconnect, so both
@@ -153,6 +160,13 @@ class TeensyLink:
     def disable(self) -> None:
         """Send 'd': Teensy disables both arms."""
         self._write(b"d")
+
+    def calibrate(self) -> None:
+        """Send 'c' (`teleop-bi-c` branch only -- `teleop-bi-p-t` doesn't have this command and
+        will just ignore the byte). Logging-only zero: captures each motor's current raw position
+        so the status line reports relative-to-this-pose from then on. Does not enable, disable,
+        or move anything, and does not touch the bilateral offset ('e') or control loop at all."""
+        self._write(b"c")
 
     def _write(self, data: bytes) -> None:
         if self._serial is None:
