@@ -247,18 +247,72 @@ unit, whatever the Teensy's own CAN feedback reports) — this pipeline does not
 or to link/joint-space angles anywhere. See `SMOLVLA_GUIDE.md` §2 if you're comparing these numbers
 against the physical arm's real range of motion.
 
-They're also **delta from two independent, session-start baselines**, not the motor's raw absolute
-reading — `observation.state[i] = slave_raw[i] - slave_baseline[i]` (baseline captured once, at
-`ForteArm.connect()`), `action[i] = master_raw[i] - master_baseline[i]` (baseline captured once, at
-`ForteArmMasterTeleop.connect()`). These are two *separate* baselines, not one shared reference —
-they should closely track each other in a well-run session (the Teensy's own bilateral offset
-already makes the slave mirror the master, and Step 4b's home-pose discipline means both arms start
-each session at matching relative poses), but nothing in code checks that they actually do. See
-`SMOLVLA_GUIDE.md` §2 for why this is delta at all (the Robstride `UNCALIBRATED` fault bit implies
-the absolute position reference isn't stable across power cycles) — pose the arm the same way at
-the start of every session before connecting (Step 4b), or episodes recorded in different sessions
-won't line up. Camera frames (`cam_1`) are unaffected — only the float `.pos` features go through
-this.
+They're also **zero-relative**, not the motor's raw absolute reading — but on `teleop-bi-c`, that
+zeroing happens firmware-side, not in `ForteArm`/`ForteArmMasterTeleop`: `self._baseline_rad` is a
+fixed `0.0` for every motor in both classes, so `.pos` is exactly what the Teensy's status line
+reports. The zero point is whatever pose you were in when you last sent `'c'` at the Teensy (Step
+12/Phase 3) — see `SMOLVLA_GUIDE.md` §2 for why this matters at all (the Robstride `UNCALIBRATED`
+fault bit implies the absolute position reference isn't stable across power cycles). Pose the arm
+the same way and re-send `'c'` at the start of every session (Step 4b's home pose), or episodes
+recorded in different sessions won't line up. Camera frames (`cam_1`) are unaffected — only the
+float `.pos` features go through this.
+
+---
+
+## Phase 6b — Managing your recorded datasets (rename, delete, inspect)
+
+Every `lerobot-record` run creates one dataset — a local folder, and (unless you passed
+`--dataset.push_to_hub=false`, Step 6) a matching repo on the Hub. Nothing about this is automatic
+housekeeping: cancelled/crashed recordings, throwaway test runs, and typos in `<TASK_NAME>` all
+leave folders behind, and only you know which ones are worth keeping.
+
+**List what you have (local):**
+```bash
+ls -la ~/.cache/huggingface/lerobot/${HF_USER}/
+du -sh ~/.cache/huggingface/lerobot/${HF_USER}/*/     # sizes -- a near-empty one is usually a
+                                                        # crashed/aborted run with 0 real episodes
+```
+
+**Check whether a given dataset actually has data in it**, without opening the visualizer:
+```bash
+cat ~/.cache/huggingface/lerobot/${HF_USER}/forte_<TASK_NAME>/meta/info.json | grep total_episodes
+```
+`"total_episodes": 0` means the run never got past the first episode (e.g. the `KeyError` we hit
+early on before Ethernet/telemetry was wired up correctly) — safe to delete without a second look.
+
+**Rename (local only):**
+```bash
+mv ~/.cache/huggingface/lerobot/${HF_USER}/forte_<OLD_NAME> \
+   ~/.cache/huggingface/lerobot/${HF_USER}/forte_<NEW_NAME>
+```
+Safe — nothing inside `meta/info.json` stores its own folder name or repo id, so a plain `mv` is
+enough for local use (e.g. pointing `--dataset.root=` at it, or Step 25's visualizer). It does
+**not** rename anything already pushed to the Hub — see below for that.
+
+**Delete (local):**
+```bash
+rm -rf ~/.cache/huggingface/lerobot/${HF_USER}/forte_<TASK_NAME>
+```
+Irreversible, no trash/undo — double-check the path before running. Useful right after Step 23 if
+an episode count or a quick `du -sh` tells you the run is junk, before it's worth the time to open
+the visualizer at all.
+
+**Managing the Hub copy** (only relevant if you pushed, i.e. didn't pass
+`--dataset.push_to_hub=false`) — a local `mv`/`rm` never touches the Hub; these are separate:
+```bash
+# List your dataset repos on the Hub
+uv run hf repos list --type dataset
+
+# Rename/move a pushed dataset (e.g. fixing a typo, or moving to an org namespace)
+uv run hf repos move ${HF_USER}/forte_<OLD_NAME> ${HF_USER}/forte_<NEW_NAME> --type dataset
+
+# Delete a pushed dataset -- irreversible, prompts for confirmation unless you pass -y
+uv run hf repos delete ${HF_USER}/forte_<TASK_NAME> --type dataset
+```
+If you renamed both sides and want them to match again, do the local `mv` and the Hub `hf repos
+move` with the same `<NEW_NAME>` — nothing enforces they stay in sync, that's on you to keep
+consistent (or just always delete+re-record instead of renaming, if that's simpler for your
+workflow).
 
 ---
 
