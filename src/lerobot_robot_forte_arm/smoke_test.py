@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """
-Read-only hardware smoke test for the Forte master/slave rig, talking to the Teensy over its
-single USB-serial port (teensy-forte, `teleop-bi` / `teleop-bi-p-t` branches).
+Read-only hardware smoke test for the Forte master/slave rig, listening to the Teensy's UDP
+telemetry (teensy-forte, `teleop-bi-c` branch -- see teensy_link.TeensyLink's docstring for why
+this is UDP-only, no serial code path).
 
-Never sends 'e' -- doesn't enable or move anything. Just opens the serial link, waits long enough
-to catch at least one status-print cycle from the Teensy (~1-2s, see LOG_PERIOD in teensy.ino),
-and prints whatever master/slave positions it received. Also optionally grabs one RealSense frame.
+Never sends 'e' -- doesn't enable or move anything (there's no way to from Python any more; use
+minicom directly on the Teensy for that). Just opens the UDP socket, waits long enough to catch at
+least one status-print cycle from the Teensy (~1-2s, see LOG_PERIOD in teensy.ino), and prints
+whatever master/slave positions it received. Also optionally grabs one RealSense frame.
 """
 
 import argparse
@@ -17,14 +19,16 @@ from lerobot_robot_forte_arm.teensy_link import TeensyLink
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", required=True, help="Teensy serial port, e.g. /dev/ttyACM0")
-    parser.add_argument("--baudrate", type=int, default=115200)
+    parser.add_argument(
+        "--udp-port", type=int, default=TeensyLink.DEFAULT_UDP_PORT,
+        help="Host UDP port to listen on for the Teensy's telemetry (must match teensy.ino's TELEMETRY_UDP_PORT)",
+    )
     parser.add_argument("--wait-s", type=float, default=3.0, help="How long to wait for status lines")
     parser.add_argument("--skip-camera", action="store_true", help="Don't try to read from the RealSense camera")
     args = parser.parse_args()
 
-    link = TeensyLink.get(args.port, args.baudrate)
-    print(f"Connecting to Teensy on {args.port} @ {args.baudrate} (never sends 'e' -- nothing will move)...")
+    link = TeensyLink.get(args.udp_port)
+    print(f"Listening for Teensy UDP telemetry on port {args.udp_port} (never sends 'e' -- nothing will move)...")
     link.connect()
     print(f"Waiting up to {args.wait_s:.1f}s for status lines...")
     time.sleep(args.wait_s)
@@ -45,11 +49,12 @@ def main() -> None:
 
     if missing:
         print(f"\nNo data received yet for: {missing}")
-        print("Check the Teensy is powered, running teensy-forte's bilateral firmware, and that")
+        print("Check the Teensy is powered, running teensy-forte's teleop-bi-c firmware, the")
+        print("Ethernet cable is connected, and that")
         print(f"--wait-s (currently {args.wait_s}) covers at least one status-print cycle.")
 
     link.disconnect()
-    print("\nSerial link disconnected.")
+    print("\nUDP telemetry listener stopped.")
 
     if not args.skip_camera:
         from lerobot.cameras.configs import ColorMode, Cv2Rotation

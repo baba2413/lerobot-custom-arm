@@ -16,12 +16,15 @@ logger = logging.getLogger(__name__)
 
 class ForteArm(Robot):
     """
-    Forte arm slave (follower), observed over the Teensy's single serial port.
+    Forte arm slave (follower), observed over UDP telemetry from the Teensy (`teleop-bi-c` branch
+    of teensy-forte -- see `teensy_link.TeensyLink`'s docstring for why this is UDP-only now and
+    has no serial code path at all: the operator runs 'e'/'c'/'d' directly at the Teensy over
+    minicom, which can now stay open for an entire `lerobot-record` session instead of being
+    closed/reopened around every episode's reset window).
 
-    IMPORTANT: this class cannot move the arm. The current teensy-forte firmware (`teleop-bi` /
-    `teleop-bi-p-t` branches) only accepts `'e'`/`'d'` (enable/disable) over serial -- there is no
-    serial command to set a goal position. All actuation of the slave happens inside the Teensy's
-    own bilateral control loop, driven by the master arm. `send_action()` is therefore a
+    IMPORTANT: this class cannot move the arm. All actuation of the slave happens inside the
+    Teensy's own bilateral control loop, driven by the master arm -- there has never been a way to
+    command a goal position over this link (serial or UDP). `send_action()` is therefore a
     logging-only no-op: it satisfies `lerobot-record`'s interface (which always calls it every
     frame) without writing anything, since there's nothing it could write to.
 
@@ -42,12 +45,12 @@ class ForteArm(Robot):
     (that's what an earlier version of this class did via `wait_for_positions()`; see
     `teensy_link.py`'s history for why that got reverted here). Recorded `.pos` is therefore
     whatever the Teensy's status line reports, unmodified. On `teleop-bi-c` that's already
-    zero-relative -- send `'c'` (see `calibrate_zero()`) once, and the firmware itself subtracts
-    each motor's `'c'`-time position before printing (logging-only on that branch, see its
-    `teensy.ino` header -- does not touch the bilateral offset or control loop at all). On
-    `teleop-bi` / `teleop-bi-p-t` (no `'c'` support), `'c'` is just an ignored byte and you'll get
-    raw absolute values with no warning, since the status line's format is identical either way
-    and there's no way to tell from here which firmware is actually flashed.
+    zero-relative -- the operator sends `'c'` once at the Teensy directly (over minicom), and the
+    firmware itself subtracts each motor's `'c'`-time position before printing (logging-only on
+    that branch, see its `teensy.ino` header -- does not touch the bilateral offset or control loop
+    at all). There is no `calibrate_zero()` method here to trigger that remotely -- see
+    `teensy_link.TeensyLink`'s docstring for why this class has no way to write to the Teensy at
+    all any more.
     """
 
     config_class = ForteArmConfig
@@ -56,7 +59,7 @@ class ForteArm(Robot):
     def __init__(self, config: ForteArmConfig):
         super().__init__(config)
         self.config = config
-        self.link = TeensyLink.get(config.port, config.baudrate)
+        self.link = TeensyLink.get(config.udp_port)
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
@@ -86,7 +89,7 @@ class ForteArm(Robot):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        logger.info(f"Connecting {self} to Teensy on {self.config.port}...")
+        logger.info(f"Connecting {self} to Teensy UDP telemetry on port {self.config.udp_port}...")
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
@@ -113,22 +116,6 @@ class ForteArm(Robot):
 
     def configure(self) -> None:
         pass
-
-    def enable(self) -> None:
-        """Send 'e' to the Teensy: enable both arms and (re)compute the master/slave offset. Only
-        call this once both arms are physically posed to match -- see RUNBOOK.md Phase 3."""
-        self.link.enable()
-
-    def disable(self) -> None:
-        """Send 'd' to the Teensy: disable both arms."""
-        self.link.disable()
-
-    def calibrate_zero(self) -> None:
-        """Send 'c' (`teleop-bi-c` branch only): logging-only zero -- the status line reports
-        relative-to-this-pose from then on, which is what makes recorded `.pos` values delta
-        instead of raw absolute (see class docstring). Does not enable, disable, or move anything.
-        A no-op byte if `teleop-bi`/`teleop-bi-p-t` is flashed instead."""
-        self.link.calibrate()
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:

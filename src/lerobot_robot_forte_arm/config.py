@@ -26,9 +26,11 @@ JOINTS: dict[str, tuple[int, int, float]] = {
 @RobotConfig.register_subclass("forte_arm")
 @dataclass
 class ForteArmConfig(RobotConfig):
-    # Serial port of the Teensy running teensy-forte's bilateral firmware, e.g. /dev/ttyACM0.
-    port: str
-    baudrate: int = 115200
+    # Host-side UDP port that the Teensy's teleop-bi-c firmware sends its status-line telemetry
+    # to (see teensy.ino's TELEMETRY_UDP_PORT -- must match). No serial device path here at all
+    # any more: operate 'e'/'c'/'d' directly at the Teensy over minicom instead, see
+    # teensy_link.TeensyLink's docstring for why.
+    udp_port: int = 5006
 
     # If the Teensy hasn't reported a motor's position in longer than this, get_observation()
     # logs a warning (the stale value is still returned -- there's currently no fresher source).

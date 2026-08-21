@@ -15,29 +15,29 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ForteArmMasterTeleopConfig(TeleoperatorConfig):
     """
-    Reads the Forte rig's human-driven MASTER arm over the same Teensy serial port the paired
-    `ForteArm` robot uses. Pass the identical `port` (and `baudrate`) as that robot's config --
-    `TeensyLink` shares one underlying serial connection per port, so both end up talking to the
-    same open connection instead of fighting over exclusive access to it.
+    Reads the Forte rig's human-driven MASTER arm over the same Teensy UDP telemetry port the
+    paired `ForteArm` robot uses. Pass the identical `udp_port` as that robot's config --
+    `TeensyLink` shares one underlying UDP socket per port, so both end up listening on the same
+    open socket instead of fighting to bind the same port twice.
     """
 
-    port: str
-    baudrate: int = 115200
+    udp_port: int = 5006
     stale_after_s: float = 3.0
 
 
 class ForteArmMasterTeleop(Teleoperator):
     """
     Read-only by design: the Teensy already owns torque/haptic-feedback control of the master
-    motors as part of its bilateral loop. This class never writes anything to the bus (there's no
-    serial command for it to use even if it wanted to -- see ForteArm's docstring).
+    motors as part of its bilateral loop. This class never writes anything to the Teensy at all --
+    see ForteArm's docstring and `teensy_link.TeensyLink`'s docstring for why (UDP-only telemetry,
+    no serial code path; the operator runs 'e'/'c'/'d' directly at the Teensy over minicom).
 
     `action_features` values are raw motor-shaft degrees (whatever the Teensy's CAN feedback
     reports), not gear-adjusted joint/link degrees -- JOINTS' external gear ratios are recorded as
     hardware documentation only and are not applied anywhere in this pipeline. See ForteArm's
     docstring for why, and for why `self._baseline_deg` is a fixed 0.0 rather than dynamically
-    captured -- on `teleop-bi-c`, `'c'` (`calibrate_zero()`) makes the firmware itself report
-    zero-relative positions, so nothing needs subtracting host-side.
+    captured -- on `teleop-bi-c`, the operator's `'c'` keypress at the Teensy makes the firmware
+    itself report zero-relative positions, so nothing needs subtracting host-side.
     """
 
     config_class = ForteArmMasterTeleopConfig
@@ -46,7 +46,7 @@ class ForteArmMasterTeleop(Teleoperator):
     def __init__(self, config: ForteArmMasterTeleopConfig):
         super().__init__(config)
         self.config = config
-        self.link = TeensyLink.get(config.port, config.baudrate)
+        self.link = TeensyLink.get(config.udp_port)
         self._master_id = {joint: master_id for joint, (_slave_id, master_id, _ratio) in JOINTS.items()}
         self._connected = False
         self._baseline_deg: dict[int, float] = {}
@@ -65,7 +65,7 @@ class ForteArmMasterTeleop(Teleoperator):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        logger.info(f"Connecting {self} to Teensy on {self.config.port} (read-only)...")
+        logger.info(f"Connecting {self} to Teensy UDP telemetry on port {self.config.udp_port}...")
         self.link.connect()
         self._baseline_deg = dict.fromkeys(self._master_id.values(), 0.0)
         self._connected = True
@@ -80,12 +80,6 @@ class ForteArmMasterTeleop(Teleoperator):
 
     def configure(self) -> None:
         pass
-
-    def calibrate_zero(self) -> None:
-        """Send 'c' (`teleop-bi-c` branch only): logging-only zero -- see ForteArm's docstring/
-        `calibrate_zero()`. Shares `TeensyLink` with `ForteArm`, so calling it from either object
-        has the same effect; only needs calling once per session, not from both."""
-        self.link.calibrate()
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:

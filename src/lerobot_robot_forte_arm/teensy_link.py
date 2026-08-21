@@ -49,12 +49,13 @@ def wait_for_positions(
         f"{missing} -- is the Teensy powered and running the right firmware?"
     )
 
-# Matches the common prefix of teensy-forte's periodic status line, present on both the
-# `teleop-bi` and `teleop-bi-p-t` branches of teensy.ino, e.g.:
+# Matches the common prefix of teensy-forte's periodic status line, present on the `teleop-bi` /
+# `teleop-bi-p-t` / `teleop-bi-c` branches of teensy.ino (identical text over serial and, on
+# `teleop-bi-c`, UDP), e.g.:
 #   [CAN1] Master 1 Pos: 0.123 rad | Slave 11 Pos: 0.125 rad | Offset: 0.002 (ENABLED)
 #   [CAN2] Master 3 Pos: -0.456 rad | Slave 13 Pos: -0.450 rad | Offset: 0.006 (ENABLED) | SLV Trq: 0.05 Nm | MST FB: -0.02 Nm
 # Deliberately doesn't anchor the whole line or require the trailing torque fields, so it matches
-# either branch's format.
+# any of the branches' formats.
 _STATUS_RE = re.compile(
     r"Master\s+(?P<master_id>\d+)\s+Pos:\s*(?P<master_pos>-?[\d.]+)\s*rad\s*\|\s*"
     r"Slave\s+(?P<slave_id>\d+)\s+Pos:\s*(?P<slave_pos>-?[\d.]+)\s*rad"
@@ -63,42 +64,55 @@ _STATUS_RE = re.compile(
 
 class TeensyLink:
     """
-    Shared serial connection to the Teensy running teensy-forte's bilateral firmware
-    (`teleop-bi` / `teleop-bi-p-t` / `teleop-bi-c` branches, `teensy/teensy.ino`). `teleop-bi-c`
-    is `teleop-bi-p-t` plus a purely-additive `'c'` command (see `calibrate()`) -- its status line
-    keeps the exact same single-number format, so `_STATUS_RE` matches all three branches
-    unchanged; `calibrate()` is simply a no-op byte on branches that don't understand `'c'`.
+    Read-only UDP telemetry link to the Teensy running teensy-forte's bilateral firmware, on the
+    `teleop-bi-c` branch specifically (`teensy/teensy.ino`) -- `teleop-bi` / `teleop-bi-p-t` only
+    print their status line over serial and have no UDP telemetry sender, so this class can't be
+    used with those two branches at all (use an older revision of this file, or flash
+    `teleop-bi-c`).
 
-    One physical Teensy exposes
-    exactly one USB-serial port, but LeRobot instantiates the slave robot (`ForteArm`) and the
-    master teleoperator (`ForteArmMasterTeleop`) independently — both need to read from that same
-    port. This class is a per-port singleton with reference-counted connect/disconnect, so both
-    callers share one underlying `serial.Serial` instead of fighting over exclusive access to it.
-    Construct instances via `TeensyLink.get(port)`, never `TeensyLink(port)` directly, or you'll
-    bypass the sharing and get two competing connections.
+    This class has **zero serial code path**, by design. Earlier revisions of this class shared a
+    `serial.Serial` between `ForteArm` and `ForteArmMasterTeleop` and also sent `'e'`/`'c'`/`'d'`
+    over it, which meant `lerobot-record` had to hold the port -- so an operator's minicom session
+    had to be closed before recording and reopened after, every single episode, just to send those
+    same three keystrokes. `teleop-bi-c`'s firmware now sends its periodic status line over UDP as
+    well as serial (identical text, see teensy.ino's `sendTelemetryLine()`), so this class only
+    ever listens on a UDP socket; the operator's minicom stays open on the serial port for the
+    entire session and sends `'e'`/`'c'`/`'d'` directly -- this class has no equivalent methods
+    because there's truly no reason for Python to also be able to send them (confirmed: LeRobot's
+    `record_loop()` never calls anything but `get_observation()`/`send_action()` mid-episode, and
+    the operator already has to be at the keyboard for physical safety during enable/disable
+    regardless).
+
+    One physical Teensy is read by both the slave robot (`ForteArm`) and the master teleoperator
+    (`ForteArmMasterTeleop`) independently. This class is a per-port singleton with
+    reference-counted connect/disconnect, so both callers share one underlying UDP socket instead
+    of each opening their own. `udp_port` must match teensy.ino's `TELEMETRY_UDP_PORT` (5006 by
+    default on both sides). There's no serial device path anywhere in this class anymore --
+    `ForteArmConfig`/`ForteArmMasterTeleopConfig`'s old `port`/`baudrate` fields (a serial device
+    path + baud rate) were replaced with a single `udp_port: int` field for the same reason.
+    Construct instances via `TeensyLink.get(udp_port)`, never `TeensyLink(udp_port)` directly, or
+    you'll bypass the sharing and get two competing sockets bound to the same port (which fails,
+    since only one can bind).
 
     A background thread continuously drains the Teensy's periodic
-    `[CAN1] Master <id> Pos: <rad> | Slave <id> Pos: <rad> | ...` status lines and caches the
-    latest position per motor CAN id, in degrees. `get_positions_deg()` is non-blocking and always
-    returns whatever was last parsed (i.e. it's a "latest known", not a fresh synchronous read).
+    `[CAN1] Master <id> Pos: <rad> | Slave <id> Pos: <rad> | ...` UDP telemetry packets and caches
+    the latest position per motor CAN id, in degrees. `get_positions_deg()` is non-blocking and
+    always returns whatever was last parsed (i.e. it's a "latest known", not a fresh synchronous
+    read).
 
-    Known limitation: this firmware only prints status roughly once a second (`LOG_PERIOD` in
-    teensy.ino). That's far too slow for real LeRobot dataset recording at typical fps
-    (10-30 Hz) — most observations between prints will be an exact repeat of the last one. See
-    SMOLVLA_GUIDE.md for the firmware change needed to fix this properly (a faster/on-demand
-    report mode); this class works with what the firmware exposes today.
-
-    This class also never writes anything except the single-byte `'e'`/`'d'` enable/disable
-    commands — there is no serial command in the current firmware to set a goal position, so
-    nothing here can command the arm to move.
+    Known limitation: the firmware only sends telemetry roughly once a second (`LOG_PERIOD` in
+    teensy.ino) -- same limitation as the old serial link, unchanged by this UDP switch. That's far
+    too slow for real LeRobot dataset recording at typical fps (10-30 Hz) — most observations
+    between packets will be an exact repeat of the last one. See SMOLVLA_GUIDE.md.
     """
 
-    _links: ClassVar[dict[str, "TeensyLink"]] = {}
+    _links: ClassVar[dict[int, "TeensyLink"]] = {}
 
-    def __init__(self, port: str, baudrate: int = 115200):
-        self.port = port
-        self.baudrate = baudrate
-        self._serial: serial.Serial | None = None
+    DEFAULT_UDP_PORT = 5006  # must match teensy.ino's TELEMETRY_UDP_PORT on teleop-bi-c
+
+    def __init__(self, udp_port: int = DEFAULT_UDP_PORT):
+        self.udp_port = udp_port
+        self._udp_sock: socket.socket | None = None
         self._ref_count = 0
         self._lock = threading.Lock()
         self._positions_deg: dict[int, float] = {}
@@ -107,31 +121,29 @@ class TeensyLink:
         self._stop_reader = threading.Event()
 
     @classmethod
-    def get(cls, port: str, baudrate: int = 115200) -> "TeensyLink":
-        link = cls._links.get(port)
+    def get(cls, udp_port: int = DEFAULT_UDP_PORT) -> "TeensyLink":
+        link = cls._links.get(udp_port)
         if link is None:
-            link = cls(port, baudrate)
-            cls._links[port] = link
-        elif link.baudrate != baudrate:
-            raise ValueError(
-                f"TeensyLink for port '{port}' already exists with baudrate={link.baudrate}, "
-                f"got a conflicting baudrate={baudrate}. Both the ForteArm robot and the "
-                f"ForteArmMasterTeleop must be configured with the same baudrate."
-            )
+            link = cls(udp_port)
+            cls._links[udp_port] = link
         return link
 
     @property
     def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+        return self._udp_sock is not None
 
     def connect(self) -> None:
         with self._lock:
-            if self._serial is None:
-                self._serial = serial.Serial(self.port, self.baudrate, timeout=0.2)
+            if self._udp_sock is None:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", self.udp_port))
+                sock.settimeout(0.2)
+                self._udp_sock = sock
                 self._stop_reader.clear()
                 self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
                 self._reader_thread.start()
-                logger.info(f"TeensyLink connected on {self.port} @ {self.baudrate}.")
+                logger.info(f"TeensyLink listening for UDP telemetry on port {self.udp_port}.")
             self._ref_count += 1
 
     def disconnect(self) -> None:
@@ -139,39 +151,18 @@ class TeensyLink:
             if self._ref_count == 0:
                 return
             self._ref_count -= 1
-            should_close = self._ref_count == 0 and self._serial is not None
+            should_close = self._ref_count == 0 and self._udp_sock is not None
             if should_close:
                 self._stop_reader.set()
-        # Join outside the lock -- the reader thread doesn't take it while blocked in readline().
+        # Join outside the lock -- the reader thread doesn't take it while blocked in recvfrom().
         if should_close:
             if self._reader_thread is not None:
                 self._reader_thread.join(timeout=1.0)
                 self._reader_thread = None
-            if self._serial is not None:
-                self._serial.close()
-                self._serial = None
-            logger.info(f"TeensyLink disconnected from {self.port}.")
-
-    def enable(self) -> None:
-        """Send 'e': Teensy enables both arms and (re)computes the master/slave position offset.
-        Only send this once both arms are physically posed to match -- see RUNBOOK.md Phase 3."""
-        self._write(b"e")
-
-    def disable(self) -> None:
-        """Send 'd': Teensy disables both arms."""
-        self._write(b"d")
-
-    def calibrate(self) -> None:
-        """Send 'c' (`teleop-bi-c` branch only -- `teleop-bi-p-t` doesn't have this command and
-        will just ignore the byte). Logging-only zero: captures each motor's current raw position
-        so the status line reports relative-to-this-pose from then on. Does not enable, disable,
-        or move anything, and does not touch the bilateral offset ('e') or control loop at all."""
-        self._write(b"c")
-
-    def _write(self, data: bytes) -> None:
-        if self._serial is None:
-            raise ConnectionError(f"TeensyLink({self.port}) is not connected.")
-        self._serial.write(data)
+            if self._udp_sock is not None:
+                self._udp_sock.close()
+                self._udp_sock = None
+            logger.info("TeensyLink UDP telemetry listener stopped.")
 
     def get_positions_deg(self) -> dict[int, float]:
         """Latest known position per CAN motor id, in degrees. Non-blocking; may be stale -- see
@@ -186,11 +177,13 @@ class TeensyLink:
         return None if last is None else time.monotonic() - last
 
     def _reader_loop(self) -> None:
-        assert self._serial is not None
+        assert self._udp_sock is not None
         while not self._stop_reader.is_set():
             try:
-                raw = self._serial.readline()
-            except serial.SerialException:
+                raw, _addr = self._udp_sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
                 break
             if not raw:
                 continue

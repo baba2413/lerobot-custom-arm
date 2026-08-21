@@ -12,8 +12,10 @@ terminal, verbatim except placeholders in `<angle brackets>`. **CHECK** = stop a
 continuing. **DECISION** = pick one of the listed options for your setup.
 
 Placeholders used throughout — set these once and reuse them:
-- `<TEENSY_PORT>` — the Teensy's serial device path (found in step 8). There is exactly **one**
-  port for the whole rig — both arms are read through this single connection.
+- `<TEENSY_PORT>` — the Teensy's serial device path (found in step 7). Used **only** for the
+  minicom console you keep open the whole session (Step 11) — LeRobot itself never touches serial
+  any more (see Phase 3/4/6: `forte_arm`/`forte_arm_master` read the Teensy over UDP telemetry
+  instead, `teleop-bi-c` firmware).
 - `<HF_USER>` — your Hugging Face username (set in step 10).
 - `<TASK_NAME>` — a short slug for the task you're teaching, e.g. `pick_cube` (chosen in step 22).
 
@@ -100,14 +102,17 @@ export TEENSY_PORT=/dev/ttyACM0   # replace with your actual path
 
 **Step 8 — RUN:**
 ```bash
-uv run forte-arm-smoke-test --port $TEENSY_PORT
+uv run forte-arm-smoke-test
 ```
+Listens on the default UDP telemetry port (5006) — pass `--udp-port` only if you changed
+`TELEMETRY_UDP_PORT` in teensy.ino.
 
 **Step 9 — CHECK:**
 All 4 joints show a slave *and* a master position (8 numbers total). If some are missing:
 - Re-run with `--wait-s 6` in case you just caught it between status prints.
-- Confirm the Teensy is powered and running `teensy-forte`'s `teleop-bi-p-t` firmware — open its
-  serial console directly (step 12) and watch for status/fault lines.
+- Confirm the Teensy is powered, running `teensy-forte`'s `teleop-bi-c` firmware, and the Ethernet
+  cable is connected — open its serial console directly (step 11) and watch for the
+  `Ethernet up: ...` line at boot plus ongoing status/fault lines.
 
 Camera line should print `frame shape (480, 640, 3)`.
 
@@ -121,11 +126,16 @@ arms hanging straight down, or both at a marked "home" position. The Teensy comp
 master↔slave position offset from whatever pose they're in at the moment you enable, so a
 mismatch here becomes a permanent offset error for this session.
 
-**Step 11 — ACTION: Open the Teensy's serial console.**
+**Step 11 — ACTION: Open the Teensy's serial console and leave it open.**
 ```bash
-screen $TEENSY_PORT 115200
+minicom -D $TEENSY_PORT -b 115200
 ```
-(any serial tool works — Arduino IDE's Serial Monitor, `minicom`, etc.)
+(`screen $TEENSY_PORT 115200` also works, but `minicom` is what the rest of this runbook assumes.)
+Unlike earlier versions of this workflow, **this console now stays open for the entire session** —
+through Phase 4, all of Phase 6's recording, every episode's reset window, all the way to Step 34.
+LeRobot's `forte_arm`/`forte_arm_master` never touch the serial port at all (they read the
+Teensy's UDP telemetry instead — `teleop-bi-c`'s firmware sends the identical status line over
+both channels), so there's nothing left to fight over.
 
 **Step 12 — ACTION: Enable.**
 Type `e` and press Enter.
@@ -140,24 +150,27 @@ Gently move the master arm through a small range on each joint one at a time. Co
 mirrors it — correct direction, no jitter, no grinding/stalling sound, no fault messages.
 
 **Step 15 — ACTION (safety): Know your kill switch.**
-Confirm you can type `d` in the serial console instantly if something looks wrong. Keep it
-visible/accessible (in a separate terminal tab) for the rest of this session — you'll need the
-Teensy's port for LeRobot commands too, so either share the console non-exclusively or be ready to
-switch tabs quickly.
+Confirm you can type `d` in the still-open minicom console instantly if something looks wrong.
+Keep that terminal tab visible/accessible for the rest of this session — you'll type `e`/`c`/`d`
+into it directly whenever needed, including mid-recording during Phase 6's reset windows (see
+Step 22).
 
 ---
 
 ## Phase 4 — Teleop sanity check through LeRobot (no recording yet)
 
-**Step 16 — RUN** (Teensy still `'e'`-enabled from Phase 3):
+**Step 16 — RUN** (Teensy still `'e'`-enabled from Phase 3, minicom console from Step 11 still
+open in another tab):
 ```bash
 uv run lerobot-teleoperate \
-  --robot.type=forte_arm --robot.port=$TEENSY_PORT --robot.id=forte_v1 \
-  --teleop.type=forte_arm_master --teleop.port=$TEENSY_PORT --teleop.id=master1 \
+  --robot.type=forte_arm --robot.id=forte_v1 \
+  --teleop.type=forte_arm_master --teleop.id=master1 \
   --display_data=true
 ```
-`--robot.port` and `--teleop.port` must be the identical path — that's what makes both objects
-share the one real connection to the Teensy instead of erroring on a second open.
+No `--robot.port`/`--teleop.port` any more — both default to UDP telemetry port 5006, which is
+what makes both objects share the one UDP socket instead of erroring on a second bind. Only pass
+`--robot.udp_port=`/`--teleop.udp_port=` (matching, and matching `TELEMETRY_UDP_PORT` in
+teensy.ino) if you changed the firmware's port.
 
 **Step 17 — CHECK:**
 Move the master by hand. In the display window, confirm the plotted joint positions move
@@ -182,11 +195,12 @@ Build one deliberate, repeatable strategy (same grasp point, same approach angle
 **Step 20 — ACTION: Name the task.**
 Pick `<TASK_NAME>` (e.g. `pick_cube`) and a one-sentence, action-phrased description.
 
-**Step 21 — RUN:**
+**Step 21 — RUN** (minicom console from Step 11 still open in another tab — leave it open for the
+whole recording session, do not close it between episodes):
 ```bash
 uv run lerobot-record \
-  --robot.type=forte_arm --robot.port=$TEENSY_PORT --robot.id=forte_v1 \
-  --teleop.type=forte_arm_master --teleop.port=$TEENSY_PORT --teleop.id=master1 \
+  --robot.type=forte_arm --robot.id=forte_v1 \
+  --teleop.type=forte_arm_master --teleop.id=master1 \
   --dataset.repo_id=${HF_USER}/forte_<TASK_NAME> \
   --dataset.single_task="<one sentence task description>" \
   --dataset.num_episodes=50 \
@@ -198,8 +212,11 @@ uv run lerobot-record \
 
 **Step 22 — ACTION: Perform the task, once per episode.**
 For each episode: perform the practiced strategy via the master arm. Between episodes, during the
-`reset_time_s` window, physically put the object back at its marked start position. Keyboard
-controls: **→** accept and move to next episode, **←** discard and redo, **ESC** finish early.
+`reset_time_s` window, physically put the object back at its marked start position — if you need
+to re-`'c'` or cycle `'d'`/`'e'` to fix a drifted offset, type it directly into the still-open
+minicom console; there is no serial port to fight over any more, so this no longer requires
+closing anything. Keyboard controls (in the LeRobot window): **→** accept and move to next
+episode, **←** discard and redo, **ESC** finish early.
 
 **Step 23 — CHECK: Where the data landed.**
 ```

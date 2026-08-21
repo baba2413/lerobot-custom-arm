@@ -56,12 +56,24 @@ default branch checked out in this repo — `git show teleop-bi:teensy/teensy.in
 **This was the load-bearing correction to an earlier draft of this guide:** an earlier version of
 `lerobot_robot_forte_arm` assumed the host PC had its own CAN adapter(s) physically tapped onto
 the Teensy's CAN1/CAN2 wiring, and talked to the motors directly over `python-can`. That hardware
-doesn't exist in this setup. **The Teensy's USB-serial port is the only link between the host and
-the arms, full stop.** `lerobot_robot_forte_arm` now reads the Teensy's text status lines and
-sends single-character `'e'`/`'d'` commands over that one port — nothing else, and nothing CAN- or
-python-can-related is used anywhere in this package anymore.
+doesn't exist in this setup. Nothing CAN- or python-can-related is used anywhere in this package.
 
-**Two direct consequences (of the `teleop-bi-p-t` firmware specifically):**
+**As of `teleop-bi-c`, `lerobot_robot_forte_arm` reads the arm over UDP, not serial.** Earlier
+revisions of this guide described the Teensy's USB-serial port as "the only link" — that stopped
+being true once `teensy_link.TeensyLink` was rewritten to a pure UDP telemetry listener (see its
+docstring). The firmware still prints its status line over serial too (unchanged, identical text —
+see teensy.ino's `sendTelemetryLine()`), but now also sends the same text as a UDP packet, and
+`lerobot_robot_forte_arm` only ever listens on that UDP socket. It has **zero serial code path**:
+no reader thread on the port, and no `'e'`/`'c'`/`'d'` write methods either — an operator runs
+those directly at the Teensy over minicom instead. This was a deliberate choice, not an oversight:
+`lerobot-record`'s `record_loop()` never calls anything but `get_observation()`/`send_action()`
+mid-episode, so there was no actual use for Python to be able to send those bytes, and giving it
+the ability anyway would have meant the serial port still needed to be closed/reopened around
+every recording session — the entire problem this rewrite exists to solve (an operator's minicom
+console can now stay open for an entire `lerobot-record` session, including every episode's reset
+window, instead of being closed before recording and reopened after).
+
+**Two direct consequences (of the `teleop-bi-p-t`/`teleop-bi-c` firmware family specifically):**
 
 1. **`ForteArm` cannot move the slave arm.** The `teleop-bi-p-t` serial protocol has no "set goal
    position" command — only `'e'`/`'d'`. All actual motor control happens inside the Teensy's own
@@ -76,16 +88,16 @@ python-can-related is used anywhere in this package anymore.
    Still open — see §14 item 1.
 
 Both the slave robot (`ForteArm`) and the master teleoperator (`ForteArmMasterTeleop`) read from
-the *same* Teensy over the *same* physical port. Since LeRobot instantiates them independently and
-a serial port can't be opened twice, `teensy_link.TeensyLink` is a per-port singleton with
-reference-counted connect/disconnect — as long as you pass the identical `--robot.port` and
-`--teleop.port`, both classes end up sharing one real `serial.Serial` connection instead of
-fighting over it.
+the *same* Teensy over the *same* UDP port. Since LeRobot instantiates them independently and a
+UDP port can only be bound once, `teensy_link.TeensyLink` is a per-port singleton with
+reference-counted connect/disconnect — as long as you pass the identical `--robot.udp_port` and
+`--teleop.udp_port` (both default to 5006), both classes end up sharing one real socket instead of
+one erroring on the bind.
 
 *(Aside, for anyone re-reading teensy.ino: CAN1 and CAN2 are the Teensy's own two onboard CAN
 peripherals — one board, not two — and which master/slave pair is wired to which of the two
 doesn't matter here, since the host never touches CAN directly at all anymore, only the merged
-text stream over the single serial port.)*
+text stream sent over serial and UDP in parallel.)*
 
 ---
 
@@ -248,22 +260,24 @@ uv run hf auth login
 ## 6. Step 1 — Hardware smoke test (never sends `'e'`, nothing can move)
 
 ```bash
-uv run forte-arm-smoke-test --port /dev/ttyACM0
+uv run forte-arm-smoke-test
 ```
 
-Opens the Teensy's serial port, waits ~3s to catch at least one status-print cycle, and prints
-whatever master/slave positions it received (raw motor-shaft degrees — see §2 on why this pipeline
-doesn't convert to link-space). Confirm all 4 joints show up for both master and slave — if some
-are missing, check the Teensy is powered and running `teleop-bi-p-t`, and that `--port` is right
-(`ls /dev/ttyACM* /dev/ttyUSB*`).
+Listens on the default UDP telemetry port (5006), waits ~3s to catch at least one status-print
+cycle, and prints whatever master/slave positions it received (raw motor-shaft degrees — see §2 on
+why this pipeline doesn't convert to link-space). Confirm all 4 joints show up for both master and
+slave — if some are missing, check the Teensy is powered, running `teleop-bi-c`, and the Ethernet
+cable is connected. There's no `--port` to get wrong any more; pass `--udp-port` only if you
+changed `TELEMETRY_UDP_PORT` in teensy.ino.
 
 ---
 
 ## 7. Step 2 — Bring up bilateral teleoperation
 
-Pose both arms to match, then send `'e'` (via the Teensy's own serial console, or
-`ForteArm(...).enable()` from a Python shell) — see RUNBOOK.md Phase 3 for the literal steps.
-Verify by hand that the slave mirrors the master correctly before doing anything else.
+Pose both arms to match, then send `'e'` directly at the Teensy's own serial console (minicom) —
+see RUNBOOK.md Phase 3 for the literal steps. There is no Python-side `enable()` any more (see §5):
+the operator always does this at the keyboard, in person, for physical safety. Verify by hand that
+the slave mirrors the master correctly before doing anything else.
 
 ---
 
@@ -271,14 +285,14 @@ Verify by hand that the slave mirrors the master correctly before doing anything
 
 ```bash
 uv run lerobot-teleoperate \
-  --robot.type=forte_arm --robot.port=/dev/ttyACM0 --robot.id=forte_v1 \
-  --teleop.type=forte_arm_master --teleop.port=/dev/ttyACM0 --teleop.id=master1 \
+  --robot.type=forte_arm --robot.id=forte_v1 \
+  --teleop.type=forte_arm_master --teleop.id=master1 \
   --display_data=true
 ```
 
-`--robot.port` and `--teleop.port` must be the **same** device path — that's what makes
-`TeensyLink` share the one real serial connection between the two objects instead of erroring on a
-second open. Confirm the displayed positions track the master as you move it by hand.
+No `--robot.port`/`--teleop.port` any more — both default to UDP port 5006, which is what makes
+`TeensyLink` share the one real socket between the two objects instead of one erroring on the
+bind. Confirm the displayed positions track the master as you move it by hand.
 
 ---
 
@@ -288,8 +302,8 @@ second open. Confirm the displayed positions track the master as you move it by 
 HF_USER=$(NO_COLOR=1 uv run hf auth whoami | awk -F': *' 'NR==1 {print $2}')
 
 uv run lerobot-record \
-  --robot.type=forte_arm --robot.port=/dev/ttyACM0 --robot.id=forte_v1 \
-  --teleop.type=forte_arm_master --teleop.port=/dev/ttyACM0 --teleop.id=master1 \
+  --robot.type=forte_arm --robot.id=forte_v1 \
+  --teleop.type=forte_arm_master --teleop.id=master1 \
   --dataset.repo_id=${HF_USER}/forte_<task_name> \
   --dataset.single_task="<one sentence, action-phrased task description>" \
   --dataset.num_episodes=50 \
@@ -383,10 +397,10 @@ Two things to keep in mind that don't apply to the bilateral firmware:
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
-| `SerialException: could not open port` | Wrong `--port`, Teensy not plugged in, or something else already has the port open. | `ls /dev/ttyACM* /dev/ttyUSB*`; close any other serial monitor (Arduino IDE, `screen`, etc.) using the same port. Note the port can renumber (`/dev/ttyACM0` → `/dev/ttyACM1`) if the Teensy re-enumerates — re-check with `ls` rather than assuming it's stable. |
-| `TeensyLink for port '...' already exists with baudrate=... got a conflicting baudrate=...` | `--robot.baudrate` and `--teleop.baudrate` don't match for the same `--port`. | Use the same baudrate (115200 default) on both. |
+| `SerialException: could not open port` (minicom, or `forte_arm_goal`/`TeensyGoalLink` on the `goal` branch) | Wrong port, Teensy not plugged in, or something else already has the port open. `forte_arm`/`forte_arm_master` (`teleop-bi-c`) no longer touch serial at all, so this can't come from them any more. | `ls /dev/ttyACM* /dev/ttyUSB*`; close any other serial monitor using the same port. Note the port can renumber (`/dev/ttyACM0` → `/dev/ttyACM1`) if the Teensy re-enumerates — re-check with `ls` rather than assuming it's stable. |
+| `OSError: [Errno 98] Address already in use` on `--robot.udp_port`/`--teleop.udp_port` | Something else on the host is already bound to that UDP port — likely a leftover `forte-arm-smoke-test` or Python process that didn't exit cleanly. | Kill the stale process; confirm with `lsof -i :5006` (or your configured port). Not caused by running `robot`+`teleop` together — `TeensyLink` ref-counts and shares one socket for that case by design. |
 | `DeviceAlreadyConnectedError: ForteArmMasterTeleop is already connected` on `lerobot-record` (but not `lerobot-teleoperate`) | Historical bug, fixed — `lerobot-record` connects `robot` before `teleop`; `ForteArmMasterTeleop.is_connected` used to read the *shared* `TeensyLink`'s state instead of its own, so it looked "already connected" the moment `ForteArm.connect()` opened the link. | Already fixed in `robot.py`/`teleop_master.py` (each tracks its own `_connected` flag now). If you see this again, that fix regressed. |
-| Smoke test shows some joints missing | Teensy not running `teleop-bi-p-t`, not yet printed its first status cycle, or a motor fault. | Re-run with a longer `--wait-s`; check the Teensy's own serial output directly for fault messages. |
+| Smoke test shows some joints missing | Teensy not running `teleop-bi-c`, not yet printed its first status cycle, Ethernet cable unplugged, or a motor fault. | Re-run with a longer `--wait-s`; check the Teensy's own serial output directly (minicom) for the `Ethernet up: ...` line and fault messages. |
 | Positions look frozen / repeat exactly | Expected — the Teensy only prints ~1x/second (§1). Not a bug. | See §14 item 1. |
 | Recorded dataset's action/state looks "steppy" (holds a value for several frames, jumps) | Same cause as above, showing up in the data. | See §14 item 1 before recording data meant for real training. |
 | `ImportError: 'rerun-sdk' is required but not installed` on `--display_data=true` | Missing the `viz` extra (§5). | `uv sync` after confirming `pyproject.toml` includes `lerobot[...,viz,...]`. |
