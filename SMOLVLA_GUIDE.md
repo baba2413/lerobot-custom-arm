@@ -120,13 +120,23 @@ host -> Teensy (UDP, port 5005): "<yaw>,<pitch>,<roll>,<elbow>" raw motor radian
 Teensy -> host (UDP, port 5006): periodic text status lines, ~1x/second, mirroring teleop-bi-c's
                                   sendTelemetryLine() -- same firmware also still prints these over
                                   serial, for a human watching screen/minicom.
-USB serial (human only):         'c' (calibrate zero) / 'd' (disable) -- typed directly at the
-                                  Teensy, never sent by Python (see teensy_link.TeensyGoalLink's
-                                  docstring for why, same rationale as TeensyLink in §1).
+USB serial (human only):         'e' (arm UDP) / 'c' (calibrate zero) / 'd' (disable + disarm) --
+                                  typed directly at the Teensy, never sent by Python (see
+                                  teensy_link.TeensyGoalLink's docstring for why, same rationale as
+                                  TeensyLink in §1).
 ```
 A 500 ms watchdog (`GOAL_TIMEOUT_MS`) auto-disables the arm if the host stops sending goal packets —
 the only thing that keeps the arm moving/enabled is a steady stream of goal commands, not a single
 "start" call.
+
+**UDP goal packets are ignored entirely unless armed via `'e'`** (`udp_armed` in `teensy.ino`), not
+auto-armed at boot or by anything else. This exists because the host's control loop keeps streaming
+packets continuously regardless of arm state — without this gate, `'d'` only paused the arm for
+`DISABLE_IGNORE_MS` (300ms) before the very next incoming packet silently re-enabled it, since
+`handleGoalPacket()` unconditionally re-enters GOAL mode for any valid packet. `'d'` now clears
+`udp_armed` too, so it's a real stop regardless of whether the host keeps sending — resuming needs
+an explicit `'e'` (and `'c'`, since `'d'` also invalidates calibration) again, not just letting the
+host's next packet through.
 
 Host side: `teensy_link.TeensyGoalLink` (a separate class from `TeensyLink`, not a variant of it —
 different wire protocol, and since there's no master arm competing for the port, no ref-counted
@@ -381,7 +391,10 @@ a routine you can run unattended.
 
 **Before any of this:** bench-test the `goal` firmware manually (§1a's checklist; see
 RUNBOOK.md Phase 9 for the literal steps) and decide real per-joint safety limits (§4, §14) — don't
-skip straight to a policy driving the arm.
+skip straight to a policy driving the arm. Also send `'c'` then `'e'` at the Teensy over
+`screen`/minicom right before starting — the firmware ignores all UDP goal packets until armed
+(§1a), and `'d'` (from a previous session, e.g. bench-testing) clears both, so this needs repeating
+even if you calibrated earlier in the same physical setup.
 
 ```bash
 uv run lerobot-rollout \

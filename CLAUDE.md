@@ -49,8 +49,13 @@ protocols):
   `TeensyLink`.** Two independent one-way UDP streams: `send_goal()` (host → Teensy, the
   continuous goal-position stream, fire-and-forget, 500ms firmware watchdog) and
   `get_positions_rad()`'s telemetry (Teensy → host, mirroring `TeensyLink`'s telemetry). No
-  `calibrate()`/`disable()` methods here either — `'c'`/`'d'` are typed directly at the Teensy
-  over minicom/screen, same rationale as `TeensyLink`.
+  `calibrate()`/`disable()` methods here either — `'e'`/`'c'`/`'d'` are typed directly at the
+  Teensy over minicom/screen, same rationale as `TeensyLink`. The firmware ignores all UDP goal
+  packets until armed via `'e'` (`udp_armed` in `teensy.ino`, not auto-armed at boot) — added after
+  discovering `'d'` alone only paused the arm for `DISABLE_IGNORE_MS` (300ms) before the next
+  incoming packet (Python streams continuously, oblivious to `'d'`) silently re-enabled it; `'d'`
+  now clears `udp_armed` too, so it's a real stop. Python-side has no equivalent of `'e'` either —
+  same reasoning as not having `calibrate()`/`disable()`.
 
 If you're asked to add a new command Python needs to send at machine rate, it goes over UDP, not
 serial — serial in this codebase is reserved for human-typed, single-character, occasional

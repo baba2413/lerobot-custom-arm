@@ -21,8 +21,10 @@ TeensyGoalLink -- that class now listens for position telemetry over UDP too (se
 but only the periodic position/status line goes out that channel, same as teleop-bi-c; the
 WARN/CALIB/JOINT LIMIT diagnostic lines this script specifically needs to see stay serial-only, so
 --port is still required here. Serial is otherwise only used for 'd' (disable) at the end -- 'c'
-(calibrate) is not sent by this script; do that yourself first if you want the clamp active (see
-RUNBOOK.md Phase 9).
+(calibrate) and 'e' (arm) are not sent by this script; do both yourself first (over
+minicom/screen), same session -- the firmware now ignores all UDP goal packets until 'e' is sent
+(see teensy.ino's udp_armed), so without it this script's ramp will silently do nothing at all
+(see RUNBOOK.md Phase 9).
 
 Usage:
     uv run python src/lerobot_robot_forte_arm/goal_limit_bench.py --port /dev/ttyACM0
