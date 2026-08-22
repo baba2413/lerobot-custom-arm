@@ -152,6 +152,101 @@ with a trained policy.** Before trusting it with a policy, bench-test manually p
 
 ---
 
+## 1b. Position/delta semantics, exactly: what value SmolVLA sees and predicts
+
+Self-contained reference section — the mechanism behind §1/§1a's "delta-from-baseline" phrasing,
+spelled out precisely enough to answer "what number is this, really" without re-deriving it from
+the code each time.
+
+**The method: baseline-relative absolute position, not velocity/incremental delta.** Every `.pos`
+value in this pipeline — recorded dataset, live observation, predicted action — is:
+
+```
+value = raw_absolute_motor_radian(t)  -  reference_pose_radian
+```
+
+`reference_pose_radian` is a **single fixed snapshot**, taken once, at one specific instant. It is
+never `raw_absolute_motor_radian(t) - raw_absolute_motor_radian(t-1)` (an incremental/velocity
+delta) and never re-captured on a rolling basis. "Delta" in this codebase means "position, expressed
+in a coordinate frame zeroed at one fixed pose" — not "how far to move from wherever the arm
+currently is." (This is also why streaming firmware-side `current_pos + received_delta` per packet,
+considered and rejected in this session, would be a different and incompatible control scheme —
+see the git history around that discussion if revisiting it.)
+
+**Recording side (bilateral, `teleop-bi-c`) — where the reference pose comes from, and how often
+it's set:**
+- The reference pose is captured **firmware-side**, by `teensy.ino`'s `calibrateZero()`, whenever
+  the operator sends `'c'` over minicom (RUNBOOK.md Phase 3). This is a manual, session-level
+  action, not automatic per-episode: nothing in `lerobot-record`'s episode loop calls it, and
+  `TeensyLink` has zero write methods at all (see its docstring) — Python has no way to trigger
+  recalibration even if it wanted to.
+- By default, one `'c'` at the start of a session zeroes every episode recorded in that session
+  against the same physical pose. RUNBOOK.md Step 22 allows re-sending `'c'` **between** episodes if
+  you notice the offset has visibly drifted — but if you do, episodes recorded before that point and
+  episodes recorded after it are zeroed against two different physical reference poses, and nothing
+  in the code detects or flags this. It's on you to know whether a mid-session recalibration
+  happened when interpreting/trusting a dataset later.
+- Once `'c'` is sent, the firmware itself prints `Slave`/`Master Pos` values already relative to
+  that zero (the single-number status-line format on `teleop-bi-c`, unlike `goal`'s two-number
+  format below). `ForteArm`/`ForteArmMasterTeleop`'s own host-side baseline is a fixed constant
+  `0.0` for exactly this reason — the subtraction already happened on the Teensy, so `get_observation()`/
+  `get_action()` pass the firmware's number straight through unmodified.
+- **What SmolVLA is actually trained on:** per frame, per joint — `observation.state.pos` = the
+  slave's delta-from-`'c'` position; `action` = the master's delta-from-`'c'` position. Both are
+  radians, both relative to the same physical zero pose for a given episode (see the drift caveat
+  above), sampled at whatever fps `lerobot-record` ran at.
+
+**Eval side (`ForteArmGoal`) — where the reference pose comes from, and exactly which host-side
+code computes the delta:**
+- The reference pose here is a **host-side** snapshot, `ForteArmGoal._baseline_rad`
+  (`robot_goal.py`), captured by `wait_for_positions()` the instant `connect()` runs. This is
+  completely independent of any firmware `'c'` state — on the `goal` branch, `'c'` only ever feeds
+  the separate `JOINT_LIMIT_MIN/MAX` safety clamp, never this baseline (confirmed by reading
+  `teensy.ino`: `zero_offset_can1/can2` is referenced only inside the clamp's bounds check, nowhere
+  near `handleGoalPacket()`'s target assignment).
+- **The delta subtraction, for observations, happens in exactly one place:** `ForteArmGoal.
+  get_observation()` (`robot_goal.py`) — `obs["<joint>.pos"] = positions[slave_id] -
+  self._baseline_rad[slave_id]`. `positions[slave_id]` itself comes from `TeensyGoalLink.
+  get_positions_rad()` (`teensy_link.py`), which does no baseline math of its own — it just relays
+  whichever raw radian the firmware's `_GOAL_STATUS_RE` match last parsed out of the telemetry
+  stream (specifically the **parenthesized** value in the firmware's `Pos: <after_calib>
+  (<raw>) rad` status line — i.e. the raw, uncalibrated number, not the `'c'`-relative one that
+  also appears on that same line). Nothing on the Teensy computes this delta at all.
+- **The delta-to-absolute conversion, for actions, happens in exactly one place:** `ForteArmGoal.
+  send_action()` (`robot_goal.py`) — `positions_rad[slave_id] = self._baseline_rad[slave_id] +
+  action["<joint>.pos"]`. The policy hands back a value in the same delta-from-baseline space it
+  was trained on; this line is what turns it back into an absolute radian, entirely host-side,
+  before anything is sent anywhere.
+
+**What actually crosses the UDP wire, and what the Teensy does with it — no delta math on the
+firmware side at all:**
+- `TeensyGoalLink.send_goal()`'s UDP payload (`"<yaw>,<pitch>,<roll>,<elbow>"`) carries the
+  **absolute** radian value computed by `send_action()` above — baseline already added back in, on
+  the host, before the packet leaves Python. The Teensy never receives a delta and never adds
+  anything to arrive at a target.
+- `teensy.ino`'s `handleGoalPacket()` writes the received values straight into
+  `goal_target_can1/can2[]`, unchanged. The main control loop passes that value directly as `pos`
+  to `operationControlCan1/can2()` — this is the literal setpoint the Robstride CAN
+  position-tracking loop (`SLV_KP`/`SLV_KD` gains) drives the motor toward.
+- The **only** place `teensy.ino` subtracts `zero_offset_can1/can2` (the `'c'` value) at all is the
+  separate `JOINT_LIMIT_MIN/MAX` bounds check inside the main loop — a safety-clamp *comparison*,
+  not a transform applied to the commanded position. If the absolute target the host sent falls
+  outside `[zero_offset + JOINT_LIMIT_MIN, zero_offset + JOINT_LIMIT_MAX]`, the firmware clamps it
+  to that boundary and logs a `JOINT LIMIT` line; otherwise the exact absolute value the host
+  computed is what the motor tracks, unmodified.
+
+**End-to-end chain, eval, one direction at a time:**
+```
+Teensy:  raw absolute position (CAN feedback)
+           --[UDP telemetry, unmodified]-->
+Host:    ForteArmGoal.get_observation(): raw - baseline  -->  policy input (delta-from-baseline)
+Host:    policy output (delta-from-baseline)  -->  ForteArmGoal.send_action(): baseline + delta
+           --[UDP goal packet, absolute, unmodified]-->
+Teensy:  operationControlCan1/can2(pos=absolute target)  -- clamped only by the separate 'c' bound
+```
+
+---
+
 ## 2. Current hardware scope
 
 Of the arm's 7 joints, **4 are motorized and wired today** on both master and slave:
