@@ -464,12 +464,20 @@ to resolve (see `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before a
 uv run lerobot-rollout \
   --robot.type=forte_arm_goal --robot.id=forte_v1 \
   --policy.path=outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/last/pretrained_model \
-  --fps=15 --display_data=true
+  --fps=15 --display_data=true --return_to_initial_position=false
 ```
 No `--robot.port` any more — `forte_arm_goal` never touches serial, only `--robot.udp_port`
 (defaults to 5006, must match `teensy.ino`'s `TELEMETRY_UDP_PORT`), same as bilateral. `--policy.path`
 also accepts a Hub repo id (e.g. `<HF_USER>/smolvla_forte_<TASK_NAME>`, matching Step 26's
 `--policy.repo_id`) instead of a local checkpoint path, if the run already pushed to the Hub.
+
+`--return_to_initial_position=false` is deliberate for a first real run: `lerobot-rollout`'s default
+(`true`) linearly interpolates every joint from wherever the policy left it back to the pose at
+connect() over a **fixed** 3 seconds/50Hz, sent through the normal `send_action()`/UDP path — no
+velocity limit, no collision awareness, just the firmware's fixed `SLV_KP`/`SLV_KD` gains and its
+per-joint clamp. If the policy ends somewhere far from home, that's a fast, automatic move with
+nothing watching it. With it off, the arm just stops wherever it is when you Ctrl+C or `'d'` — check
+it's clear before deciding whether to trust the auto-return on a later run.
 No `--teleop.*` flags — `ForteArmGoal` has no paired teleoperator. (`lerobot-eval` is for
 gym-style simulation environments despite the name — don't use it for a bare real robot.) To save
 the eval episodes as a dataset instead, use `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`

@@ -387,7 +387,7 @@ skip straight to a policy driving the arm.
 uv run lerobot-rollout \
   --robot.type=forte_arm_goal --robot.id=forte_v1 \
   --policy.path=outputs/train/smolvla_forte_<task_name>/checkpoints/last/pretrained_model \
-  --fps=15 --display_data=true
+  --fps=15 --display_data=true --return_to_initial_position=false
 ```
 No `--robot.port` — `forte_arm_goal` never touches serial from Python (§1a), only
 `--robot.udp_port` (defaults to 5006, same as bilateral). `--policy.path` also accepts a Hub repo
@@ -397,6 +397,14 @@ pushed to the Hub. (`lerobot-eval` is for gym-style simulation environments, not
 `--teleop.*` flags needed, since `ForteArmGoal` has no paired teleoperator. If you want the eval
 episodes themselves saved as a dataset instead, `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
 with `--teleop` simply omitted works too.)
+
+`--return_to_initial_position=false`: `lerobot-rollout`'s default (`true`) linearly interpolates
+every joint from its final pose back to whatever `get_observation()` returned at `connect()`, over
+a **fixed** 3s/50Hz window sent through the normal UDP `send_action()` path — no velocity limit, no
+collision awareness, just the firmware's fixed `SLV_KP`/`SLV_KD` gains and per-joint clamp
+(`lerobot/rollout/strategies/core.py`'s `_return_to_initial_position()`). If the policy ends far
+from home, that's a fast, unsupervised move. Leave it off until you've verified the auto-return
+behavior deliberately (e.g. from a small, known offset) rather than trusting it on a first run.
 
 Two things to keep in mind that don't apply to the bilateral firmware:
 - The `goal` firmware's 500 ms watchdog (§1a) means `send_action()` must be called that often to
