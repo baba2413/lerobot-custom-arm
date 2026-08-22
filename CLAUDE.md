@@ -112,13 +112,19 @@ extra there and re-running `uv sync`, not `pip install`ing directly into the ven
   directly from the host via `python-can` (see `SMOLVLA_GUIDE.md` §1 for why that got scrapped).
   Don't build on these or assume they reflect current architecture; safe to ignore or delete.
 
-Plugin registration note: `ForteArmGoal` (in `robot_goal.py`) is never explicitly imported by
-`__init__.py`, yet `--robot.type=forte_arm_goal` still resolves. This isn't broken — `lerobot`'s
-`make_device_from_device_class()` fallback derives the device class name by stripping `Config` off
-the registered config class name (`ForteArmGoalConfig` → `ForteArmGoal`) and searches sibling
-modules for it. Keep new robot/teleop classes following the `<Thing>` class in a module discoverable
-next to `<Thing>Config`'s registration if you add one, rather than assuming you need to wire up
-explicit imports.
+Plugin registration note (**corrected — the previous version of this note was wrong, caught only
+when Phase 9 was first run for real**): `lerobot`'s `make_device_from_device_class()`
+(`lerobot/utils/import_utils.py`) derives a device class name by stripping `Config` off the config
+class name (`ForteArmGoalConfig` → `ForteArmGoal`), then only checks two candidate modules: the
+config class's own top-level package (`lerobot_robot_forte_arm`, i.e. `__init__.py`) and a module
+named exactly the *lowercased* device class name (`lerobot_robot_forte_arm.fortearmgoal`) — **it
+never looks in `robot_goal.py` or any other differently-named sibling module.** So every
+robot/teleop class this package registers **must** be explicitly imported (and ideally re-exported
+via `__all__`) in `__init__.py` — that's the only candidate that reliably matches here, since
+nothing is named to match the lowercased-class-name pattern. `ForteArmGoal` was missing from
+`__init__.py` until this was caught (silently broken the entire time `goal`/eval was
+"written but not yet run end-to-end") — if you add a new robot/teleop class, add its import to
+`__init__.py` immediately, don't assume the fallback will find it.
 
 ## Working conventions specific to this project
 
