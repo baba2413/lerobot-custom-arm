@@ -15,11 +15,12 @@ per-joint clamp is active at all (only the wide +-12.4 rad protocol limit) -- MA
 a hard stop for exactly that case, so this script can't ramp indefinitely into the arm's physical
 range if you forgot to calibrate first.
 
-Transport matches the firmware's hybrid split: goal-position targets go out over Ethernet UDP
-(matching TeensyGoalLink.send_goal(), see teensy_link.py), but this script reads the serial port
-directly rather than going through TeensyGoalLink -- that class's reader thread only extracts
-position telemetry and silently discards the WARN/CALIB/JOINT LIMIT diagnostic lines this script
-specifically needs to see. Serial is otherwise only used for 'd' (disable) at the end -- 'c'
+Goal-position targets go out over Ethernet UDP (matching TeensyGoalLink.send_goal(), see
+teensy_link.py). This script also reads the serial port directly rather than going through
+TeensyGoalLink -- that class now listens for position telemetry over UDP too (see its docstring),
+but only the periodic position/status line goes out that channel, same as teleop-bi-c; the
+WARN/CALIB/JOINT LIMIT diagnostic lines this script specifically needs to see stay serial-only, so
+--port is still required here. Serial is otherwise only used for 'd' (disable) at the end -- 'c'
 (calibrate) is not sent by this script; do that yourself first if you want the clamp active (see
 RUNBOOK.md Phase 9).
 

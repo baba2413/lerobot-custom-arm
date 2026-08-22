@@ -54,11 +54,11 @@ class ForteArmConfig(RobotConfig):
 @RobotConfig.register_subclass("forte_arm_goal")
 @dataclass
 class ForteArmGoalConfig(RobotConfig):
-    # Serial port of the Teensy running teensy-forte's standalone GOAL-following firmware
-    # (`goal` branch -- single arm, no master, no bilateral teleop). Not compatible with the
-    # bilateral firmware ForteArmConfig points at -- different wire protocol.
-    port: str
-    baudrate: int = 115200
+    # Host-side UDP port that the Teensy's `goal` firmware sends its status-line telemetry to
+    # (see teensy.ino's TELEMETRY_UDP_PORT -- must match). No serial device path here at all:
+    # operate 'c'/'d' directly at the Teensy over minicom/screen instead, see
+    # teensy_link.TeensyGoalLink's docstring for why.
+    udp_port: int = 5006
 
     # If the Teensy hasn't reported a motor's position in longer than this, get_observation()
     # logs a warning (the stale value is still returned -- there's currently no fresher source).

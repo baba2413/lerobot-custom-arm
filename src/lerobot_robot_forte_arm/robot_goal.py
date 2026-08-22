@@ -23,8 +23,10 @@ class ForteArmGoal(Robot):
 
     Unlike `ForteArm.send_action()` (a no-op, since the bilateral firmware has no goal-position
     command -- see that class's docstring), `send_action()` here actually commands the arm via
-    `TeensyGoalLink.send_goal()` -- over Ethernet UDP, not serial (see that class's docstring for
-    the hybrid transport split). This is what Phase 9 eval / trained-policy control needs.
+    `TeensyGoalLink.send_goal()`, over Ethernet UDP. This is what Phase 9 eval / trained-policy
+    control needs. Like `ForteArm`, this class has no Python-side write path for 'c'/'d' -- the
+    operator sends those directly at the Teensy over minicom/screen (see `TeensyGoalLink`'s
+    docstring); `disconnect()` doesn't auto-disable any more either, for the same reason.
 
     The firmware auto-disables if it doesn't see a new goal packet within GOAL_TIMEOUT_MS (500ms
     in teensy.ino), so `send_action()` must be called at least that often -- normal for a policy
@@ -51,7 +53,7 @@ class ForteArmGoal(Robot):
     def __init__(self, config: ForteArmGoalConfig):
         super().__init__(config)
         self.config = config
-        self.link = TeensyGoalLink(config.port, config.baudrate)
+        self.link = TeensyGoalLink(config.udp_port)
         self._slave_id = {joint: slave_id for joint, (slave_id, _master_id, _ratio) in JOINTS.items()}
         self.cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
@@ -81,7 +83,7 @@ class ForteArmGoal(Robot):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        logger.info(f"Connecting {self} to Teensy on {self.config.port} (GOAL firmware)...")
+        logger.info(f"Connecting {self} to Teensy on UDP port {self.config.udp_port} (GOAL firmware)...")
         self.link.connect()
         for cam in self.cameras.values():
             cam.connect()
@@ -91,7 +93,8 @@ class ForteArmGoal(Robot):
 
     @check_if_not_connected
     def disconnect(self) -> None:
-        self.link.disable()  # stop the arm before dropping the connection
+        # No Python-side disable() any more -- see class docstring and TeensyGoalLink's. The
+        # operator sends 'd' at minicom/screen directly; this only tears down our own UDP sockets.
         self.link.disconnect()
         for cam in self.cameras.values():
             cam.disconnect()
@@ -102,7 +105,8 @@ class ForteArmGoal(Robot):
     def is_calibrated(self) -> bool:
         # Not applicable: Robstride motors report absolute position directly. Note this is the
         # standard LeRobot Robot ABC lifecycle hook, unrelated to the firmware's own 'c'
-        # zero-calibration -- see calibrate_zero() for that.
+        # zero-calibration, which is purely operator-driven over minicom/screen -- see class
+        # docstring and RUNBOOK.md Phase 9. Nothing in this class can trigger it remotely.
         return True
 
     def calibrate(self) -> None:
@@ -110,12 +114,6 @@ class ForteArmGoal(Robot):
 
     def configure(self) -> None:
         pass
-
-    def calibrate_zero(self) -> None:
-        """Send 'c' (serial): capture the arm's current pose as each motor's software zero.
-        Needed for the firmware's per-joint limit clamp to be enforced -- see RUNBOOK.md Phase 9.
-        Not the same as calibrate() above (that's LeRobot's own ABC hook, a no-op here)."""
-        self.link.calibrate()
 
     def enable(self) -> None:
         """Enter GOAL mode holding the arm's current position -- sends that position as the first
@@ -126,10 +124,6 @@ class ForteArmGoal(Robot):
         Requires get_observation() to have run at least once first, so the link has a known
         position to send."""
         self.link.enable()
-
-    def disable(self) -> None:
-        """Send 'd' (serial): stop and disable."""
-        self.link.disable()
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:

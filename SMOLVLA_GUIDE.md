@@ -103,37 +103,42 @@ text stream sent over serial and UDP in parallel.)*
 
 ## 1a. The `goal` firmware: a separate, single-arm branch for eval
 
-Standalone policy control (§9/§12) needed a serial command the bilateral firmware never had, so
-rather than bolt one onto `teleop-bi-p-t`, it's a **separate standalone firmware** on the `goal`
-branch of `teensy-forte` — no master arm, no bilateral logic, no haptic feedback, just the 4 slave
-motors driven toward host-streamed targets. Consistent with how every branch in this repo is a
+Standalone policy control (§9/§12) needed a command the bilateral firmware never had, so rather
+than bolt one onto `teleop-bi-p-t`, it's a **separate standalone firmware** on the `goal` branch of
+`teensy-forte` — no master arm, no bilateral logic, no haptic feedback, just the 4 slave motors
+driven toward host-streamed targets. Consistent with how every branch in this repo is a
 self-contained snapshot for one job, not a layer meant to be combined with another (this was a
 correction mid-session — an earlier pass at this branch mistakenly extended `teleop-bi-p-t` with a
 bolted-on mode instead of starting a standalone build).
 
-Serial protocol (host → Teensy):
+Transport is UDP-only from Python's side, same split as `teleop-bi-c` (§1) and for the same reason:
 ```
-g\n                              -> enter GOAL mode, holding the arm's current position
-g <yaw> <pitch> <roll> <elbow>\n -> enter/refresh GOAL mode, set the 4 joint targets
-                                     (raw motor radians; kinematic order -- motor ids 11,13,12,14 --
-                                     NOT CAN-wiring order, which would be 11,12,13,14)
-d                                -> disable (zero-torque, stop)
+host -> Teensy (UDP, port 5005): "<yaw>,<pitch>,<roll>,<elbow>" raw motor radians, kinematic order
+                                  (motor ids 11,13,12,14 -- NOT CAN-wiring order, 11,12,13,14).
+                                  Every packet both sets the 4 targets and enters/refreshes GOAL
+                                  mode -- there's no separate "enter mode" packet.
+Teensy -> host (UDP, port 5006): periodic text status lines, ~1x/second, mirroring teleop-bi-c's
+                                  sendTelemetryLine() -- same firmware also still prints these over
+                                  serial, for a human watching screen/minicom.
+USB serial (human only):         'c' (calibrate zero) / 'd' (disable) -- typed directly at the
+                                  Teensy, never sent by Python (see teensy_link.TeensyGoalLink's
+                                  docstring for why, same rationale as TeensyLink in §1).
 ```
-A 150 ms watchdog (`GOAL_TIMEOUT_MS`) auto-disables the arm if the host stops sending `'g'` lines —
+A 500 ms watchdog (`GOAL_TIMEOUT_MS`) auto-disables the arm if the host stops sending goal packets —
 the only thing that keeps the arm moving/enabled is a steady stream of goal commands, not a single
 "start" call.
 
 Host side: `teensy_link.TeensyGoalLink` (a separate class from `TeensyLink`, not a variant of it —
 different wire protocol, and since there's no master arm competing for the port, no ref-counted
-sharing needed) exposes `send_goal()`, `enable()`, `disable()`, `get_positions_rad()`. `robot_goal.
-ForteArmGoal` (`--robot.type=forte_arm_goal`) wraps that as a full `Robot`, and unlike `ForteArm`,
-its `send_action()` actually moves the arm.
+sharing needed) exposes `send_goal()`, `enable()`, `get_positions_rad()` — no `calibrate()`/
+`disable()`, same reasoning as `TeensyLink` has none. `robot_goal.ForteArmGoal`
+(`--robot.type=forte_arm_goal`) wraps that as a full `Robot`, and unlike `ForteArm`, its
+`send_action()` actually moves the arm.
 
-**Status as of this session: written, not yet flashed or bench-tested on real hardware.** Before
-trusting it with a policy, bench-test manually over `screen`/minicom: bare `g` holds current pose
-with no jump, `g <values>` moves the correct physical joint per axis (one at a time — this is the
-first real-hardware check of the yaw/pitch/roll/elbow ↔ motor-id mapping), `d` stops immediately,
-and letting `'g'` lines lapse trips the watchdog within ~150 ms.
+**Status as of this writing: bench-tested (`forte-arm-goal-limit-bench`), not yet run end-to-end
+with a trained policy.** Before trusting it with a policy, bench-test manually per RUNBOOK.md Phase
+9: pose + `'c'` first, then ramp one axis at a time and confirm the firmware's own
+`[CANx JOINT LIMIT] ... clamped to [lo, hi]` line fires at a sensible bound for each of the 4 axes.
 
 ---
 
@@ -370,9 +375,9 @@ works, for a real accuracy gain at the cost of more VRAM/step time.
 
 ## 12. Step 7 — Evaluate on the real arm
 
-No longer blocked on firmware capability — `goal`/`ForteArmGoal` (§1a) exists — but **not yet
-verified on real hardware**, so treat everything below as a draft to validate carefully, not a
-routine you can run unattended.
+No longer blocked on firmware capability — `goal`/`ForteArmGoal` (§1a) exists — but **not yet run
+end-to-end with a trained policy**, so treat everything below as a draft to validate carefully, not
+a routine you can run unattended.
 
 **Before any of this:** bench-test the `goal` firmware manually (§1a's checklist; see
 RUNBOOK.md Phase 9 for the literal steps) and decide real per-joint safety limits (§4, §14) — don't
@@ -380,22 +385,29 @@ skip straight to a policy driving the arm.
 
 ```bash
 uv run lerobot-rollout \
-  --robot.type=forte_arm_goal --robot.port=/dev/ttyACM0 --robot.id=forte_v1 \
+  --robot.type=forte_arm_goal --robot.id=forte_v1 \
   --policy.path=outputs/train/smolvla_forte_<task_name>/checkpoints/last/pretrained_model \
   --fps=15 --display_data=true
 ```
-(`lerobot-eval` is for gym-style simulation environments, not a bare real robot — don't reach for
-it here despite the name. `lerobot-rollout` is the real-hardware equivalent; no `--teleop.*` flags
-needed, since `ForteArmGoal` has no paired teleoperator. If you want the eval episodes themselves
-saved as a dataset instead, `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
+No `--robot.port` — `forte_arm_goal` never touches serial from Python (§1a), only
+`--robot.udp_port` (defaults to 5006, same as bilateral). `--policy.path` also accepts a Hub repo
+id (`<HF_USER>/smolvla_forte_<task_name>`) instead of a local checkpoint path, if training already
+pushed to the Hub. (`lerobot-eval` is for gym-style simulation environments, not a bare real robot
+— don't reach for it here despite the name. `lerobot-rollout` is the real-hardware equivalent; no
+`--teleop.*` flags needed, since `ForteArmGoal` has no paired teleoperator. If you want the eval
+episodes themselves saved as a dataset instead, `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
 with `--teleop` simply omitted works too.)
 
 Two things to keep in mind that don't apply to the bilateral firmware:
-- The `goal` firmware's 150 ms watchdog (§1a) means `send_action()` must be called that often to
+- The `goal` firmware's 500 ms watchdog (§1a) means `send_action()` must be called that often to
   keep the arm moving — a policy inference stall (slow model, host under load) shows up as the arm
   stopping mid-motion, not as a queued/delayed command.
 - `forte_arm_goal`'s `.pos` units match `forte_arm`'s exactly (raw motor-shaft radians, §2) by
   design — a policy trained on `forte_arm` recordings should need no unit translation to run here.
+
+Since `lerobot-rollout` never opens the serial port, a `screen <TEENSY_PORT> 115200` session can
+stay open in another terminal for the entire rollout for `'d'`-reachability, same as minicom during
+recording — see RUNBOOK.md Phase 9 Step 34.
 
 ---
 
@@ -403,8 +415,8 @@ Two things to keep in mind that don't apply to the bilateral firmware:
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
-| `SerialException: could not open port` (minicom, or `forte_arm_goal`/`TeensyGoalLink` on the `goal` branch) | Wrong port, Teensy not plugged in, or something else already has the port open. `forte_arm`/`forte_arm_master` (`teleop-bi-c`) no longer touch serial at all, so this can't come from them any more. | `ls /dev/ttyACM* /dev/ttyUSB*`; close any other serial monitor using the same port. Note the port can renumber (`/dev/ttyACM0` → `/dev/ttyACM1`) if the Teensy re-enumerates — re-check with `ls` rather than assuming it's stable. |
-| `OSError: [Errno 98] Address already in use` on `--robot.udp_port`/`--teleop.udp_port` | Something else on the host is already bound to that UDP port — likely a leftover `forte-arm-smoke-test` or Python process that didn't exit cleanly. | Kill the stale process; confirm with `lsof -i :5006` (or your configured port). Not caused by running `robot`+`teleop` together — `TeensyLink` ref-counts and shares one socket for that case by design. |
+| `SerialException: could not open port` (minicom/screen, or `forte-arm-goal-limit-bench`) | Wrong port, Teensy not plugged in, or something else already has the port open (e.g. a `screen` session still open when the bench script starts — see RUNBOOK.md Phase 9 Step 30). Neither `forte_arm`/`forte_arm_master` (`teleop-bi-c`) nor `forte_arm_goal` (`goal`) touch serial from Python at all any more, so this can't come from `lerobot-record`/`lerobot-rollout` themselves. | `ls /dev/ttyACM* /dev/ttyUSB*`; close any other serial monitor using the same port. Note the port can renumber (`/dev/ttyACM0` → `/dev/ttyACM1`) if the Teensy re-enumerates — re-check with `ls` rather than assuming it's stable. |
+| `OSError: [Errno 98] Address already in use` on `--robot.udp_port`/`--teleop.udp_port` | Something else on the host is already bound to that UDP port — likely a leftover `forte-arm-smoke-test`, `lerobot-rollout`, or other Python process that didn't exit cleanly. Applies to both `forte_arm`/`forte_arm_master` (port 5006 by default) and `forte_arm_goal` (also 5006 by default, but a separate process/session — never run both firmwares' host processes at once anyway). | Kill the stale process; confirm with `lsof -i :5006` (or your configured port). Not caused by running bilateral `robot`+`teleop` together — `TeensyLink` ref-counts and shares one socket for that case by design. |
 | `DeviceAlreadyConnectedError: ForteArmMasterTeleop is already connected` on `lerobot-record` (but not `lerobot-teleoperate`) | Historical bug, fixed — `lerobot-record` connects `robot` before `teleop`; `ForteArmMasterTeleop.is_connected` used to read the *shared* `TeensyLink`'s state instead of its own, so it looked "already connected" the moment `ForteArm.connect()` opened the link. | Already fixed in `robot.py`/`teleop_master.py` (each tracks its own `_connected` flag now). If you see this again, that fix regressed. |
 | Smoke test shows some joints missing | Teensy not running `teleop-bi-c`, not yet printed its first status cycle, Ethernet cable unplugged, or a motor fault. | Re-run with a longer `--wait-s`; check the Teensy's own serial output directly (minicom) for the `Ethernet up: ...` line and fault messages. |
 | Positions look frozen / repeat exactly | Expected — the Teensy only prints ~1x/second (§1). Not a bug. | See §14 item 1. |

@@ -403,11 +403,14 @@ keep, don't delete — either pass `--resume=true` to continue that run, or pick
 
 The firmware capability this used to be blocked on now exists — a standalone goal-following
 firmware, `teensy-forte`'s **`goal`** branch, single arm only (no master, no bilateral logic), plus
-a matching `Robot` class (`ForteArmGoal`, `--robot.type=forte_arm_goal`). Protocol is hybrid, not
-serial-only: `'c'`/`'d'` (calibrate/disable) still go over USB serial, but the continuous
-goal-position stream goes over **Ethernet UDP** to the Teensy (static IP `192.168.1.15:5005`,
-direct cable, no gateway/router — referenced from `teensy-forte`'s `isaacsim-udp` branch). Per-joint
-safety limits (`JOINT_LIMIT_MIN/MAX_CAN1/CAN2` in `teensy.ino`) are configured with real values, not
+a matching `Robot` class (`ForteArmGoal`, `--robot.type=forte_arm_goal`). Transport is **UDP-only**
+from Python's side, same as bilateral: the continuous goal-position stream goes host→Teensy over
+Ethernet UDP (static IP `192.168.1.15:5005`, direct cable, no gateway/router — referenced from
+`teensy-forte`'s `isaacsim-udp` branch), and position telemetry comes back Teensy→host over a
+second UDP port (5006 by default). `'c'`/`'d'` (calibrate/disable) are typed by you directly at the
+Teensy over minicom/screen — `lerobot-rollout` never opens that port at all, so it's yours to hold
+open for the whole session, exactly like Phase 3's minicom during recording. Per-joint safety
+limits (`JOINT_LIMIT_MIN/MAX_CAN1/CAN2` in `teensy.ino`) are configured with real values, not
 placeholders. **Still not run end-to-end with a trained policy as of this writing** — treat this as
 a careful first real run, not a routine.
 
@@ -420,8 +423,11 @@ git checkout goal
 This **replaces** `teleop-bi-p-t` on the Teensy — you cannot teleoperate or record more bilateral
 data until you reflash back afterward. Confirm you're done with Phases 3–8 for this session first.
 Also connect a direct Ethernet cable between the host and the Teensy — `'c'`/`'d'` work over USB
-alone, but nothing will move without the Ethernet link up (host static IP on the `192.168.1.0/24`
-subnet, e.g. `192.168.1.10`).
+alone, but nothing will move without the Ethernet link up, and (unlike the old serial-only
+telemetry) `lerobot-rollout`'s own position readback needs it too now (host static IP on the
+`192.168.1.0/24` subnet, e.g. `192.168.1.10`). The firmware still prints the same status lines over
+serial as well, so a human watching `screen`/minicom can see positions even if Ethernet is down —
+only Python's reading depends on the link being up.
 
 **Step 30 — ACTION: Pose the arm at your marked home position (Step 4b), then calibrate.**
 ```bash
@@ -429,7 +435,10 @@ screen <TEENSY_PORT> 115200
 ```
 Type `c`. Confirm each motor reports `zero set: 0.000 (<raw>) rad` and
 `Calibration complete. Per-joint limits now active relative to this pose.` If any motor reports
-`no CAN feedback yet -- FAILED`, don't proceed — that motor isn't communicating.
+`no CAN feedback yet -- FAILED`, don't proceed — that motor isn't communicating. Exit this `screen`
+session before Step 31 — `goal_limit_bench.py` needs exclusive access to the port for its own
+diagnostic reading (see that step). You can reopen `screen` afterward for Step 33, and this time
+leave it open for the whole rollout — `lerobot-rollout` never touches serial at all.
 
 **Step 31 — ACTION: Bench-test the UDP goal stream before trusting a policy with it.**
 ```bash
@@ -441,9 +450,10 @@ one motor slowly, holding the other three at their current position, watching fo
 own `[CANx JOINT LIMIT] ... clamped to [lo, hi]` line — confirming both that the correct physical
 joint moves in the direction you intended, and that the real per-joint clamp actually engages on
 hardware, not just in source. Repeat for all 4 axes before trusting a combined/policy-driven
-command. This script needs `--port` open for serial (status/log lines, `'d'` at the end) *and* the
-Ethernet link up for the actual UDP ramp — if Ethernet isn't connected it'll read status fine but
-nothing will move.
+command. This script needs `--port` open for serial (status/log lines, `'d'` at the end — it reads
+serial directly, not through `TeensyGoalLink`) *and* the Ethernet link up for the actual UDP ramp —
+if Ethernet isn't connected it'll read status fine but nothing will move. It closes the serial port
+itself when it exits, so the port is free again afterward.
 
 **Step 32 — CHECK:** all four axes moved the correct joint in the correct direction, and the clamp
 fired at a sensible bound for each. If any axis is wrong, stop — that's a wiring/protocol mismatch
@@ -452,10 +462,14 @@ to resolve (see `teensy.ino` and `teensy_link.py`'s `GOAL_MOTOR_ORDER`) before a
 **Step 33 — RUN: rollout a trained policy.**
 ```bash
 uv run lerobot-rollout \
-  --robot.type=forte_arm_goal --robot.port=<TEENSY_PORT> --robot.id=forte_v1 \
+  --robot.type=forte_arm_goal --robot.id=forte_v1 \
   --policy.path=outputs/train/smolvla_forte_<TASK_NAME>/checkpoints/last/pretrained_model \
   --fps=15 --display_data=true
 ```
+No `--robot.port` any more — `forte_arm_goal` never touches serial, only `--robot.udp_port`
+(defaults to 5006, must match `teensy.ino`'s `TELEMETRY_UDP_PORT`), same as bilateral. `--policy.path`
+also accepts a Hub repo id (e.g. `<HF_USER>/smolvla_forte_<TASK_NAME>`, matching Step 26's
+`--policy.repo_id`) instead of a local checkpoint path, if the run already pushed to the Hub.
 No `--teleop.*` flags — `ForteArmGoal` has no paired teleoperator. (`lerobot-eval` is for
 gym-style simulation environments despite the name — don't use it for a bare real robot.) To save
 the eval episodes as a dataset instead, use `lerobot-record --policy.path=... --robot.type=forte_arm_goal ...`
@@ -464,15 +478,17 @@ and uses it as the session's delta baseline (Step 4b) — make sure the arm is a
 home pose *before* this command starts, same as recording.
 
 **Step 34 — ACTION (safety): keep `'d'` reachable.**
-Same rule as Phase 3's kill switch, but note two things specific to this firmware:
-- A second serial console will contend with whatever Python process holds `--port` right now (see
-  `SMOLVLA_GUIDE.md` §4) — Ctrl+C on the running `lerobot-rollout`/`lerobot-record` process is the
-  practical stop, not a second concurrent reader.
-- `'d'` briefly ignores any UDP goal packet for 300ms after it's sent (`DISABLE_IGNORE_MS` in
-  teensy.ino), specifically so a straggler packet already in flight can't silently undo the
-  disable and re-enable the motors uncalibrated. You may see a
-  `"GOAL packet ignored (just disabled...)"` line right after disabling — that's this working as
-  intended, not an error.
+Same rule as Phase 3's kill switch. Since `lerobot-rollout` never opens the serial port, you can
+have `screen <TEENSY_PORT> 115200` open in another terminal for the entire rollout and type `'d'`
+there directly the moment something looks wrong — no port contention, same as minicom during
+`lerobot-record`. Ctrl+C on the `lerobot-rollout`/`lerobot-record` process itself is a second,
+independent stop (it just stops sending goal packets; the firmware's own 500ms watchdog then
+auto-disables), but `'d'` at the keyboard is the immediate one.
+
+After `'d'`, the firmware briefly ignores any UDP goal packet for 300ms (`DISABLE_IGNORE_MS` in
+teensy.ino), specifically so a straggler packet already in flight can't silently undo the disable
+and re-enable the motors uncalibrated. You may see a `"GOAL packet ignored (just disabled...)"`
+line right after disabling — that's this working as intended, not an error.
 
 ---
 

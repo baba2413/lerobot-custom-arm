@@ -45,9 +45,12 @@ protocols):
   `lerobot-record` session (including every episode's reset window) because Python never needs
   the serial port at all. Don't add write methods back onto this class without a very good reason
   — that was a deliberate, discussed design choice, not an oversight.
-- **`TeensyGoalLink`** (`goal` branch only) — hybrid: serial for `'c'`/`'d'` (human-supervised,
-  no payload), UDP for the continuous goal-position stream (`send_goal()`, fire-and-forget,
-  500ms firmware watchdog).
+- **`TeensyGoalLink`** (`goal` branch only) — **UDP-only, zero serial code path, same as
+  `TeensyLink`.** Two independent one-way UDP streams: `send_goal()` (host → Teensy, the
+  continuous goal-position stream, fire-and-forget, 500ms firmware watchdog) and
+  `get_positions_rad()`'s telemetry (Teensy → host, mirroring `TeensyLink`'s telemetry). No
+  `calibrate()`/`disable()` methods here either — `'c'`/`'d'` are typed directly at the Teensy
+  over minicom/screen, same rationale as `TeensyLink`.
 
 If you're asked to add a new command Python needs to send at machine rate, it goes over UDP, not
 serial — serial in this codebase is reserved for human-typed, single-character, occasional

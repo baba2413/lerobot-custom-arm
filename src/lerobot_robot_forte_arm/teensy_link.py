@@ -5,8 +5,6 @@ import threading
 import time
 from typing import ClassVar, Iterable, Protocol
 
-import serial
-
 logger = logging.getLogger(__name__)
 
 
@@ -241,15 +239,22 @@ class TeensyGoalLink:
     one Python-side consumer during eval, so this class owns its connections directly instead of
     reference-counting like `TeensyLink` has to.
 
-    Hybrid transport, matching the firmware's split (referenced from teensy-forte's isaacsim-udp
-    branch, which solved the same "one channel, two jobs" problem we hit when goal-streaming
-    briefly lived on serial -- see git history on the `goal` branch for what that cost):
-      - USB serial: `calibrate()` ('c') / `disable()` ('d'), single-char, human-supervised. Also
-        the source of `get_positions_rad()`'s telemetry (the firmware's periodic status line).
-      - Ethernet UDP: `send_goal()`, the continuous goal-position stream. Fire-and-forget
-        datagrams to (UDP_HOST, UDP_PORT) -- no connection/handshake/delivery guarantee, matching
-        the firmware's stateless, watchdog-protected design (GOAL_TIMEOUT_MS = 500ms in
-        teensy.ino): a dropped packet just means the next one takes over.
+    **Zero serial code path**, same as `TeensyLink` and for the same reason: `'c'`/`'d'` are
+    single-char, human-supervised commands, typed directly at the Teensy over minicom/screen --
+    there's no method here to send them, on purpose (an earlier revision of this class did send
+    them from Python, which was wrong for the same reason `TeensyLink` never grew that back: a
+    human already has to be at the keyboard for enable/disable regardless, so there's nothing for
+    Python to add except another way for the arm to move without a person's hand on the switch).
+    That leaves the USB serial port entirely free for a person to hold open for the whole eval
+    session, exactly like minicom during `lerobot-record`.
+
+    Two independent one-way UDP streams, both fire-and-forget (no connection/handshake/delivery
+    guarantee, matching the firmware's stateless, watchdog-protected design -- GOAL_TIMEOUT_MS =
+    500ms in teensy.ino -- a dropped packet just means the next one takes over):
+      - `send_goal()`: host -> Teensy, the continuous goal-position stream, to (UDP_HOST, UDP_PORT).
+      - `get_positions_rad()`'s telemetry: Teensy -> host, the firmware's periodic status line,
+        mirroring `TeensyLink`'s `sendTelemetryLine()` -- listened for on `telemetry_udp_port`
+        (must match teensy.ino's `TELEMETRY_UDP_PORT`).
 
     Like `TeensyLink`, this class works entirely in raw motor-shaft **radians** throughout
     (commands and `get_positions_rad()` alike -- the firmware's own native unit, no degrees
@@ -258,12 +263,13 @@ class TeensyGoalLink:
     """
 
     UDP_HOST = "192.168.1.15"  # matches teensy.ino's static IP (staticIP, direct-cable setup)
-    UDP_PORT = 5005
+    UDP_PORT = 5005  # Teensy's incoming goal-packet port (teensy.ino's UDP_PORT)
 
-    def __init__(self, port: str, baudrate: int = 115200):
-        self.port = port
-        self.baudrate = baudrate
-        self._serial: serial.Serial | None = None
+    DEFAULT_TELEMETRY_UDP_PORT = 5006  # must match teensy.ino's TELEMETRY_UDP_PORT
+
+    def __init__(self, telemetry_udp_port: int = DEFAULT_TELEMETRY_UDP_PORT):
+        self.telemetry_udp_port = telemetry_udp_port
+        self._telemetry_sock: socket.socket | None = None
         self._udp_sock: socket.socket | None = None
         self._lock = threading.Lock()
         self._positions_rad: dict[int, float] = {}
@@ -273,45 +279,38 @@ class TeensyGoalLink:
 
     @property
     def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open and self._udp_sock is not None
+        return self._telemetry_sock is not None and self._udp_sock is not None
 
     def connect(self) -> None:
-        if self._serial is not None:
+        if self._telemetry_sock is not None:
             return
-        self._serial = serial.Serial(self.port, self.baudrate, timeout=0.2)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", self.telemetry_udp_port))
+        sock.settimeout(0.2)
+        self._telemetry_sock = sock
         self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._stop_reader.clear()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
         logger.info(
-            f"TeensyGoalLink connected: serial {self.port} @ {self.baudrate}, "
-            f"UDP -> {self.UDP_HOST}:{self.UDP_PORT}."
+            f"TeensyGoalLink connected: telemetry UDP listening on :{self.telemetry_udp_port}, "
+            f"goal UDP -> {self.UDP_HOST}:{self.UDP_PORT}."
         )
 
     def disconnect(self) -> None:
-        if self._serial is None:
+        if self._telemetry_sock is None:
             return
         self._stop_reader.set()
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=1.0)
             self._reader_thread = None
-        self._serial.close()
-        self._serial = None
+        self._telemetry_sock.close()
+        self._telemetry_sock = None
         if self._udp_sock is not None:
             self._udp_sock.close()
             self._udp_sock = None
-        logger.info(f"TeensyGoalLink disconnected from {self.port}.")
-
-    def calibrate(self) -> None:
-        """Send 'c' over serial: capture the arm's current pose as each motor's software zero
-        (offset only, no physical move). Needed for the firmware's per-joint limit clamp to be
-        enforced -- see RUNBOOK.md Phase 9."""
-        self._write_serial(b"c")
-
-    def disable(self) -> None:
-        """Send 'd' over serial: stop and disable. Also clears calibration on the firmware side --
-        call calibrate() again before the next send_goal() if you want the limit clamp back."""
-        self._write_serial(b"d")
+        logger.info("TeensyGoalLink disconnected.")
 
     def enable(self) -> None:
         """Enter GOAL mode holding the arm's current position -- the UDP-era equivalent of the old
@@ -323,8 +322,8 @@ class TeensyGoalLink:
         missing = [m for m in GOAL_MOTOR_ORDER if m not in positions]
         if missing:
             raise RuntimeError(
-                f"TeensyGoalLink({self.port}): no known position yet for motor id(s) {missing} -- "
-                "wait for at least one status line (printed ~1x/second) before calling enable()."
+                f"TeensyGoalLink: no known position yet for motor id(s) {missing} -- wait for at "
+                "least one status line (printed ~1x/second) before calling enable()."
             )
         self.send_goal(positions)
 
@@ -340,20 +339,15 @@ class TeensyGoalLink:
         fire-and-forget: this does not block and does not confirm delivery.
         """
         if self._udp_sock is None:
-            raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
+            raise ConnectionError("TeensyGoalLink is not connected.")
         values = [positions_rad[motor_id] for motor_id in GOAL_MOTOR_ORDER]
         payload = ",".join(f"{v:.4f}" for v in values)
         self._udp_sock.sendto(payload.encode("ascii"), (self.UDP_HOST, self.UDP_PORT))
 
-    def _write_serial(self, data: bytes) -> None:
-        if self._serial is None:
-            raise ConnectionError(f"TeensyGoalLink({self.port}) is not connected.")
-        self._serial.write(data)
-
     def get_positions_rad(self) -> dict[int, float]:
         """Latest known position per CAN motor id, in radians (firmware's native unit). Non-blocking;
-        may be stale -- see age_s(). Sourced from the firmware's periodic serial status line,
-        independent of the UDP goal stream."""
+        may be stale -- see age_s(). Sourced from the firmware's periodic telemetry UDP packets,
+        independent of the (separate, host->Teensy) goal stream."""
         with self._lock:
             return dict(self._positions_rad)
 
@@ -364,11 +358,13 @@ class TeensyGoalLink:
         return None if last is None else time.monotonic() - last
 
     def _reader_loop(self) -> None:
-        assert self._serial is not None
+        assert self._telemetry_sock is not None
         while not self._stop_reader.is_set():
             try:
-                raw = self._serial.readline()
-            except serial.SerialException:
+                raw, _addr = self._telemetry_sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
                 break
             if not raw:
                 continue
